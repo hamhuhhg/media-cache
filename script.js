@@ -282,7 +282,8 @@ function parseMimeType(mimeTypeStr) {
                     muxer: null,
                     isMuxedCandidate: false,
                     createdAt: now,
-                    lastActivity: now
+                    lastActivity: now,
+                    processingAttempted: false // <-- NEW FLAG
                 };
                 arr.push(entry);
                 console.log("MediaCache: Created new VIDEO entry:", entry.id, "MIME:", mimeType, "Parsed Codec:", parsedMime.codec);
@@ -340,7 +341,8 @@ function parseMimeType(mimeTypeStr) {
                         muxer: null,
                         isMuxedCandidate: false,
                         createdAt: now,
-                        lastActivity: now
+                        lastActivity: now,
+                        processingAttempted: false // <-- NEW FLAG
                     };
                     arr.push(entry);
                     console.log("MediaCache: Created new AUDIO-ONLY entry:", entry.id, "MIME:", mimeType, "Parsed Codec:", parsedMime.codec);
@@ -560,11 +562,20 @@ async function initMuxer(entry) {
             codec: entry.video.codec === 'h264' ? 'avc' : entry.video.codec,
             width: entry.video.width,
             height: entry.video.height,
+            decoderConfig: entry.video.decoderConfig || {
+                colorSpace: {
+                    primaries: 'bt709',
+                    transfer: 'bt709',
+                    matrix: 'bt709',
+                    fullRange: false
+                }
+            }
         },
         audio: {
             codec: entry.audio.codec,
             numberOfChannels: entry.audio.numberOfChannels,
             sampleRate: entry.audio.sampleRate,
+            decoderConfig: entry.audio.decoderConfig || null
         },
         fastStart: 'in-memory',
         firstTimestampBehavior: 'offset'
@@ -573,24 +584,31 @@ async function initMuxer(entry) {
 
     try {
         entry.muxer = new Mp4Muxer.Muxer(muxerOptions);
-        console.log("MediaCache: Muxer SUCCESSIVELY initialized for entry:", entry.id /*, entry.muxer*/ ); // Avoid logging the whole muxer object here, too verbose
+        console.log("MediaCache: Muxer SUCCESSIVELY initialized for entry:", entry.id);
         return true;
     } catch (e) {
-        console.error("MediaCache: initMuxer FAIL: Error during Mp4Muxer instantiation for entry:", entry.id, e, "Options were:", muxerOptions);
+        console.error("MediaCache: initMuxer FAIL: Error during Mp4Muxer instantiation for entry:", entry.id, e, "Options were:", JSON.parse(JSON.stringify(muxerOptions)));
         entry.muxer = null;
         return false;
     }
 }
 
 async function finalizeMuxingAndDownload(entry) {
-    console.log("MediaCache: finalizeMuxingAndDownload called for entry:", entry ? entry.id : "null entry",
-                "Is Candidate:", entry?.isMuxedCandidate,
-                "Video Chunks:", entry?.video?.data?.length,
-                "Audio Chunks:", entry?.audio?.data?.length);
     if (!entry) {
         console.warn("MediaCache: finalizeMuxingAndDownload called with no entry.");
         return;
     }
+
+    if (entry.processingAttempted) {
+        console.log(`MediaCache: Entry ${entry.id} already processed or processing initiated. Skipping.`);
+        return;
+    }
+    entry.processingAttempted = true;
+
+    console.log("MediaCache: finalizeMuxingAndDownload called for entry:", entry ? entry.id : "null entry",
+                "Is Candidate:", entry?.isMuxedCandidate,
+                "Video Chunks:", entry?.video?.data?.length,
+                "Audio Chunks:", entry?.audio?.data?.length);
 
     // Store original data references in case of muxing failure to allow fallback
     const originalVideoData = entry.video ? [...entry.video.data] : [];
