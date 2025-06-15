@@ -66,7 +66,13 @@
                         await browserToUse.scripting.executeScript({
                             target: { tabId: tab.id },
                             files: ["bridge.js"]
-                        })
+        });
+        // Inject mp4-muxer.js first
+        await browserToUse.scripting.executeScript({
+            target: { tabId: tab.id },
+            files: ["lib/mp4-muxer.js"]
+        });
+        // Then inject script.js
                         await browserToUse.scripting.executeScript({
                             target: { tabId: tab.id },
                             files: ['script.js'],

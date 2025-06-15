@@ -25,7 +25,13 @@
                     await browserToUse.scripting.executeScript({
                         target: { tabId: ids[0].id },
                         files: ["/bridge.js"]
-                    })
+        });
+        // Inject mp4-muxer.js first
+        await browserToUse.scripting.executeScript({
+            target: { tabId: ids[0].id },
+            files: ["/lib/mp4-muxer.js"]
+        });
+        // Then inject script.js
                     await browserToUse.scripting.executeScript({
                         target: { tabId: ids[0].id },
                         files: ['/script.js'],
@@ -71,40 +77,131 @@
      * A Map that contains all the available downloads from the various content script that are being run
      */
     const tabResultStorage = new Map();
-    document.getElementById("availableTabs").onchange = () => { // The user has changed the selected items in the tab
-        document.getElementById("availableDownloads").innerHTML = "";
-        for (const item of tabResultStorage.get(+document.getElementById("availableTabs").value)) { // Create a Card with all of the downloadable items of that folder
-            const card = document.createElement("div");
-            card.classList.add("card");
-            card.style.backgroundColor = "var(--cardsecond)";
-            card.style.marginBottom = "15px";
-            card.append(Object.assign(document.createElement("h3"), {
-                textContent: `${item.title} [ID: ${item.id}] [Mimetype: ${item.mimeType}]`,
-            }), Object.assign(document.createElement("button"), {
-                textContent: item.writable ? "Finalize stream" : "Download",
+    document.getElementById("availableTabs").onchange = () => {
+        document.getElementById("availableDownloads").innerHTML = ""; // Clear previous cards
+        const selectedTabId = +document.getElementById("availableTabs").value;
+        const itemsForSelectedTab = tabResultStorage.get(selectedTabId);
+
+        if (itemsForSelectedTab) {
+            for (const item of itemsForSelectedTab) {
+                if (!item) continue; // Skip if item is null (e.g. filtered out in script.js)
+
+                const card = document.createElement("div");
+                card.classList.add("card");
+                card.style.backgroundColor = "var(--cardsecond)";
+                card.style.marginBottom = "15px";
+
+                let titleText = item.title; // Title from script.js (already descriptive)
+                let detailText = item.description || `ID: ${item.id.substring(0,8)}`;
+                if (item.videoDataSize > 0 || item.audioDataSize > 0) { // Check if either has data, not just video
+                    detailText += ` (V: ${item.videoDataSize > 0 ? 'Yes' : 'No'}, A: ${item.audioDataSize > 0 ? 'Yes' : 'No'})`;
+                }
+
+                card.append(Object.assign(document.createElement("h3"), {
+                    textContent: titleText,
+                    title: item.id // Full ID on hover
+                }), Object.assign(document.createElement("p"), { // Use a paragraph for details
+                    textContent: detailText,
+                    style: "font-size: 0.9em; color: #ccc;"
+                }));
+
+                // Main action button (Download/Mux or Finalize)
+                const mainButton = Object.assign(document.createElement("button"), {
+                    // Determine button text and action
+                });
+
+                let canDownloadMuxed = item.isMuxedCandidate && (item.videoDataSize > 0 || item.videoWritable) && (item.audioDataSize > 0 || item.audioWritable);
+                let isAnyStreamOnFs = item.videoWritable || item.audioWritable;
+
+                if (canDownloadMuxed) {
+                    mainButton.textContent = "Download Muxed MP4";
+                } else if (item.videoDataSize > 0 || item.videoWritable) {
+                    mainButton.textContent = "Download Video";
+                } else if (item.audioDataSize > 0 || item.audioWritable) {
+                    mainButton.textContent = "Download Audio";
+                } else {
+                    mainButton.textContent = "No Data (or already processed)";
+                    mainButton.disabled = true;
+                }
+
+                mainButton.onclick = () => {
+                    browserToUse.tabs.sendMessage(selectedTabId, {
+                        action: "downloadThis",
+                        content: item.id
+                    });
+                    mainButton.textContent = "Processing...";
+                    mainButton.disabled = true;
+                    setTimeout(() => {
+                         setTimeout(()=> browserToUse.tabs.sendMessage(selectedTabId, { action: "getDownloads", content: { id: selectedTabId, title: document.getElementById("availableTabs").options[document.getElementById("availableTabs").selectedIndex].text } }), 2000);
+
+                    }, 1500);
+                };
+                card.append(mainButton);
+
+                if (isAnyStreamOnFs) {
+                    const finalizeButton = Object.assign(document.createElement("button"), {
+                        textContent: "Finalize FS Stream(s)",
+                        style: "margin-left: 10px;",
+                        onclick: () => {
+                            browserToUse.tabs.sendMessage(selectedTabId, {
+                                action: "fsFinalize",
+                                content: item.id
+                            });
+                            finalizeButton.textContent = "Finalizing...";
+                            finalizeButton.disabled = true;
+                             setTimeout(()=> browserToUse.tabs.sendMessage(selectedTabId, { action: "getDownloads", content: { id: selectedTabId, title: document.getElementById("availableTabs").options[document.getElementById("availableTabs").selectedIndex].text } }), 2000);
+                        }
+                    });
+                    card.append(finalizeButton);
+                }
+
+                const hasAnyLocalData = item.videoDataSize > 0 || item.audioDataSize > 0;
+                const hasAnyFsData = item.videoWritable || item.audioWritable;
+
+                if (hasAnyLocalData || hasAnyFsData) {
+                     card.append(document.createElement("br"), document.createElement("br"));
+                    if (hasAnyLocalData && !isAnyStreamOnFs) {
+                         card.append(Object.assign(document.createElement("label"), {
+                            style: "text-decoration: underline; margin-right: 10px; cursor: pointer;",
+                            textContent: "Delete In-Memory Data",
+                            onclick: () => {
+                                browserToUse.tabs.sendMessage(selectedTabId, { action: "deleteThis", content: { id: item.id, permanent: false } });
+                                card.remove();
+                            }
+                        }));
+                    }
+
+                    card.append(Object.assign(document.createElement("label"), {
+                        textContent: "Delete Entry (and future data)",
+                        style: "text-decoration: underline; cursor: pointer;",
+                        onclick: () => {
+                            browserToUse.tabs.sendMessage(selectedTabId, { action: "deleteThis", content: { id: item.id, permanent: true } });
+                            card.remove();
+                        }
+                    }));
+                }
+                document.getElementById("availableDownloads").append(card);
+            }
+        }
+
+        const downloadAllButton = document.getElementById("downloadAllButton");
+        if (downloadAllButton) downloadAllButton.remove();
+
+        if (itemsForSelectedTab && itemsForSelectedTab.length > 0) {
+             document.getElementById("availableDownloads").append(Object.assign(document.createElement("button"), {
+                id: "downloadAllButton",
+                textContent: "Process All Visible",
                 onclick: () => {
-                    browserToUse.tabs.sendMessage(+document.getElementById("availableTabs").value, { action: item.writable ? "fsFinalize" : "downloadThis", content: item.id });
+                    const currentItems = tabResultStorage.get(selectedTabId);
+                    if (currentItems) {
+                        for (const item of currentItems) {
+                             if (!item) continue;
+                            browserToUse.tabs.sendMessage(selectedTabId, { action: "downloadThis", content: item.id });
+                        }
+                    }
+                    setTimeout(()=> browserToUse.tabs.sendMessage(selectedTabId, { action: "getDownloads", content: { id: selectedTabId, title: document.getElementById("availableTabs").options[document.getElementById("availableTabs").selectedIndex].text } }), 2000);
                 }
             }));
-            !item.writable && card.append(document.createElement("br"),
-                document.createElement("br"),
-                Object.assign(document.createElement("label"), {
-                    style: "text-decoration: underline; margin-right: 10px;",
-                    textContent: "Delete current data",
-                    onclick: () => {
-                        browserToUse.tabs.sendMessage(+document.getElementById("availableTabs").value, { action: "deleteThis", content: { id: item.id, permanent: false } });
-                        card.remove();
-                    }
-                }),
-                Object.assign(document.createElement("label"), {
-                    textContent: "Delete current and future data",
-                    style: "text-decoration: underline",
-                    onclick: () => {
-                        browserToUse.tabs.sendMessage(+document.getElementById("availableTabs").value, { action: "deleteThis", content: { id: item.id, permanent: true } });
-                        card.remove();
-                    }
-                }));
-            document.getElementById("availableDownloads").append(card);
         }
         browserToUse.tabs.sendMessage(+document.getElementById("availableTabs").value, { action: "getChoices" });
     }
