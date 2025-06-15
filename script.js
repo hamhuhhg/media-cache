@@ -131,7 +131,7 @@
         return file;
     }
 
-    function parseMimeType(mimeTypeStr) {
+    function parseMimeType(mimeTypeStr) { // Corrected function name from parseMineType to parseMimeType
         if (!mimeTypeStr) return null;
 
         const result = {
@@ -177,6 +177,7 @@
                 // Handled
              }
         }
+        console.log("MediaCache: parseMimeType input:", mimeTypeStr, "output:", result);
         return result;
     }
 
@@ -186,12 +187,14 @@
     async function start() { // start function stays, but MediaSource.prototype.addSourceBuffer is modified
         const originalAddSourceBuffer = MediaSource.prototype.addSourceBuffer;
         MediaSource.prototype.addSourceBuffer = function (mimeType) { // Keep "function" to inherit 'this'
+            console.log("MediaCache: addSourceBuffer called with MIME type:", mimeType);
             const sourceBuffer = originalAddSourceBuffer.call(this, mimeType);
             const parsedMime = parseMimeType(mimeType);
+            console.log("MediaCache: Parsed MIME info:", parsedMime);
 
             if (!parsedMime || !parsedMime.type) {
-                console.warn("MediaCache: Unknown or unhandled MIME type, not caching:", mimeType);
-                return sourceBuffer; // Return original if we can't handle it
+                console.warn("MediaCache: Unknown or unhandled MIME type in addSourceBuffer, not caching:", mimeType);
+                return sourceBuffer;
             }
 
             let entry = null;
@@ -225,6 +228,7 @@
                     lastActivity: now
                 };
                 arr.push(entry);
+                console.log("MediaCache: Created new VIDEO entry:", entry.id, "MIME:", mimeType, "Parsed Codec:", parsedMime.codec);
                 setTimeout(() => addTitle(entry.id, 0), 1500); // Keep title logic similar
             } else if (parsedMime.type === 'audio') {
                 // Try to associate with a recent video entry
@@ -252,6 +256,7 @@
                     };
                     entry.isMuxedCandidate = true; // Now a candidate for muxing
                     entry.lastActivity = now;
+                    console.log("MediaCache: Associated AUDIO stream with entry:", entry.id, "MIME:", mimeType, "Parsed Codec:", parsedMime.codec, "Now mux candidate:", entry.isMuxedCandidate);
                 } else {
                     // Create audio-only entry
                     const newId = crypto.randomUUID() ?? `${Math.random()}-${mimeType}-${Date.now()}`;
@@ -281,6 +286,7 @@
                         lastActivity: now
                     };
                     arr.push(entry);
+                    console.log("MediaCache: Created new AUDIO-ONLY entry:", entry.id, "MIME:", mimeType, "Parsed Codec:", parsedMime.codec);
                     setTimeout(() => addTitle(entry.id, 0), 1500);
                 }
             }
@@ -288,6 +294,7 @@
             if (!entry) { // Should not happen if parsedMime.type is valid
                 return sourceBuffer;
             }
+            console.log("MediaCache: addSourceBuffer finished for entry ID:", entry ? entry.id : 'N/A', "Is Mux Candidate:", entry ? entry.isMuxedCandidate : 'N/A');
 
             // FileSystem logic (picker part)
             if (picker !== undefined && entry) { // Check entry exists
@@ -325,6 +332,16 @@
                     const targetStream = currentEntry[parsedMime.type]; // parsedMime.type from outer scope
 
                     if (targetStream) {
+                        // KEY FRAME ASSUMPTION:
+                        // This assumes the very first chunk appended to a track's SourceBuffer is a key frame,
+                        // and all subsequent chunks are delta frames. This is a significant simplification.
+                        // Modern streaming (DASH/HLS with fMP4) delivers media in segments, each starting
+                        // with a key frame. If these segments are appended after frameCount > 0,
+                        // their initial key frames will be misidentified as 'delta'.
+                        // This can lead to muxing errors or unplayable files if the muxer (Mp4Muxer)
+                        // relies on accurate keyframe identification for segmenting or indexing.
+                        // True key frame detection would require complex media parsing.
+                        // Errors during muxer.addVideoChunkRaw() or muxer.finalize() might be related to this if other parameters seem correct.
                         const chunkType = targetStream.frameCount === 0 ? 'key' : 'delta';
                         const timestamp = targetStream.currentTimeInMicros;
 
@@ -353,15 +370,14 @@
                             duration: estimatedDuration,
                             type: chunkType
                         };
+                        console.log(`MediaCache: [Entry ${currentEntry.id}] appendBuffer for ${parsedMime.type}:`,
+                                    `Type: ${chunkInfo.type}`,
+                                    `Timestamp: ${chunkInfo.timestamp}µs`,
+                                    `Duration: ${chunkInfo.duration}µs`,
+                                    `Size: ${chunkInfo.buffer.byteLength}`,
+                                    `Frame/ChunkCount: ${targetStream.frameCount}`);
 
                         if (targetStream.writable) {
-                            // targetStream.data.push(chunkInfo); // Don't push to data if directly writing to FS for elementary stream to avoid duplicate processing.
-                                                              // However, if fsWriteOperation is meant to drain this, it should be pushed.
-                                                              // For now, assume direct write means data doesn't need to be in this array for FS.
-                                                              // This needs careful consideration based on how FS writing is triggered.
-                                                              // If fsWriteOperation is ONLY for initial backlog, then this direct write is fine.
-                                                              // If appendBuffer should *also* queue for a later fsWriteOperation call (e.g. user clicks save later), it must push.
-                                                              // Given current fsWriteOperation drains, let's push.
                             targetStream.data.push(chunkInfo);
                             targetStream.writable.write({ data: chunkInfo.buffer, position: targetStream.currentWrite, type: "write" });
                             targetStream.currentWrite += chunkInfo.buffer.byteLength;
@@ -412,79 +428,108 @@
     }
 
 async function initMuxer(entry) {
+    console.log("MediaCache: initMuxer called for entry:", entry.id,
+                "Video Codec:", entry.video?.codec, "Audio Codec:", entry.audio?.codec,
+                "Initial video WxH:", entry.video?.width + "x" + entry.video?.height,
+                "Initial audio SR/Ch:", entry.audio?.sampleRate + "/" + entry.audio?.numberOfChannels);
+
     if (!entry || !entry.video || !entry.audio || !entry.video.codec || !entry.audio.codec) {
-        console.warn("MediaCache: Cannot init muxer, missing video/audio tracks or codecs.", entry.id);
+        console.warn("MediaCache: initMuxer PRE-CHECK FAIL: Missing video/audio tracks or codecs.", entry.id);
         return false;
     }
 
-    // Try to get video dimensions from the video element
-    let videoElement = document.querySelector('video');
-    let width = entry.video.width;
-    let height = entry.video.height;
+    let videoElement = document.querySelector('video'); // Query active video element
+    let width = entry.video.width; // Should be null initially unless parseMimeType evolved
+    let height = entry.video.height; // Should be null initially
+    let dimsFrom = "entry data (likely null)";
 
     if (videoElement && videoElement.videoWidth > 0 && videoElement.videoHeight > 0) {
         width = videoElement.videoWidth;
         height = videoElement.videoHeight;
-    } else { // Fallback if video element not found or dimensions not ready
-        if (!width || !height) { // If still no width/height
-             // Try finding a visible video element and get its dimensions
-            const videos = document.querySelectorAll('video');
-            for (let v of videos) {
-                if (v.videoWidth > 0 && v.videoHeight > 0) {
-                    width = v.videoWidth;
-                    height = v.videoHeight;
-                    console.log(`MediaCache: Used dimensions from querySelectorAll: ${width}x${height}`);
-                    break;
-                }
-            }
-            if (!width || !height) {
-                console.warn("MediaCache: Video dimensions not available for muxing for entry:", entry.id, "Using fallback 640x360. Muxing might be incorrect.");
-                width = 640; // Fallback dimensions
-                height = 360;
+        dimsFrom = "document.querySelector('video')";
+    } else {
+        const videos = document.querySelectorAll('video');
+        for (let v of videos) {
+            if (v.videoWidth > 0 && v.videoHeight > 0) {
+                width = v.videoWidth;
+                height = v.videoHeight;
+                dimsFrom = "document.querySelectorAll('video')";
+                break; // Use first one found with dimensions
             }
         }
     }
-    entry.video.width = width; // Store resolved width
-    entry.video.height = height; // Store resolved height
 
+    if (!width || !height) {
+        console.warn(`MediaCache: initMuxer FAIL: Video dimensions not found for entry ${entry.id}. Tried: ${dimsFrom}. Cannot proceed with muxing.`);
+        return false; // Strict: No dimensions, no muxing.
+    }
+    console.log(`MediaCache: initMuxer - Video dimensions for ${entry.id} from ${dimsFrom}: ${width}x${height}`);
+    entry.video.width = width;
+    entry.video.height = height;
 
-    // Audio parameters - use stored if available, else default
-    const sampleRate = entry.audio.sampleRate || 48000;
-    const numberOfChannels = entry.audio.numberOfChannels || 2;
-    entry.audio.sampleRate = sampleRate; // Store resolved/default
-    entry.audio.numberOfChannels = numberOfChannels; // Store resolved/default
+    // Audio parameters
+    let sampleRate = entry.audio.sampleRate;
+    let numberOfChannels = entry.audio.numberOfChannels;
+    let audioParamsFrom = "entry.audio object";
 
-    if (!width || !height || !entry.video.codec || !entry.audio.codec || !sampleRate || !numberOfChannels) {
-        console.error("MediaCache: Critical information missing for muxer initialization.", entry);
+    if (!sampleRate || !numberOfChannels) {
+        if (entry.audio.codec === 'aac') {
+            sampleRate = sampleRate || 48000;
+            numberOfChannels = numberOfChannels || 2;
+            audioParamsFrom = "AAC defaults (48k, 2ch)";
+            console.warn(`MediaCache: initMuxer - Audio SR/Ch for ${entry.id} not found, using AAC defaults: ${sampleRate}/${numberOfChannels}`);
+        } else if (entry.audio.codec === 'opus') {
+            sampleRate = sampleRate || 48000;
+            numberOfChannels = numberOfChannels || 2;
+            audioParamsFrom = "Opus defaults (48k, 2ch)";
+            console.warn(`MediaCache: initMuxer - Audio SR/Ch for ${entry.id} not found, using Opus defaults: ${sampleRate}/${numberOfChannels}`);
+        } else {
+            console.warn(`MediaCache: initMuxer FAIL: Audio sampleRate or numberOfChannels not found for entry ${entry.id} (Codec: ${entry.audio.codec}). Cannot proceed with muxing.`);
+            return false; // Strict: No SR/Ch for unknown/other codecs, no muxing.
+        }
+    }
+    console.log(`MediaCache: initMuxer - Audio params for ${entry.id} from ${audioParamsFrom}: SR=${sampleRate}, Ch=${numberOfChannels}`);
+    entry.audio.sampleRate = sampleRate;
+    entry.audio.numberOfChannels = numberOfChannels;
+
+    if (!entry.video.codec || !entry.audio.codec) {
+        console.error("MediaCache: initMuxer FAIL: Codec information missing even after checks for entry:", entry.id);
         return false;
     }
 
+    const muxerOptions = {
+        target: new Mp4Muxer.ArrayBufferTarget(),
+        video: {
+            codec: entry.video.codec === 'h264' ? 'avc' : entry.video.codec,
+            width: entry.video.width,
+            height: entry.video.height,
+        },
+        audio: {
+            codec: entry.audio.codec,
+            numberOfChannels: entry.audio.numberOfChannels,
+            sampleRate: entry.audio.sampleRate,
+        },
+        fastStart: 'in-memory',
+        firstTimestampBehavior: 'offset'
+    };
+    console.log("MediaCache: Mp4Muxer options for entry:", entry.id, JSON.parse(JSON.stringify(muxerOptions))); // Clean log
+
     try {
-        entry.muxer = new Mp4Muxer.Muxer({
-            target: new Mp4Muxer.ArrayBufferTarget(),
-            video: {
-                codec: entry.video.codec === 'h264' ? 'avc' : entry.video.codec, // mp4-muxer uses 'avc'
-                width: width,
-                height: height,
-            },
-            audio: {
-                codec: entry.audio.codec,
-                numberOfChannels: numberOfChannels,
-                sampleRate: sampleRate,
-            },
-            fastStart: 'in-memory',
-            firstTimestampBehavior: 'offset'
-        });
-        console.log("MediaCache: Muxer initialized for entry:", entry.id, entry.muxer);
+        entry.muxer = new Mp4Muxer.Muxer(muxerOptions);
+        console.log("MediaCache: Muxer SUCCESSIVELY initialized for entry:", entry.id /*, entry.muxer*/ ); // Avoid logging the whole muxer object here, too verbose
         return true;
     } catch (e) {
-        console.error("MediaCache: Failed to initialize Mp4Muxer:", e, entry);
+        console.error("MediaCache: initMuxer FAIL: Error during Mp4Muxer instantiation for entry:", entry.id, e, "Options were:", muxerOptions);
         entry.muxer = null;
         return false;
     }
 }
 
 async function finalizeMuxingAndDownload(entry) {
+    console.log("MediaCache: finalizeMuxingAndDownload called for entry:", entry ? entry.id : "null entry",
+                "Is Candidate:", entry?.isMuxedCandidate,
+                "Video Chunks:", entry?.video?.data?.length,
+                "Audio Chunks:", entry?.audio?.data?.length);
     if (!entry) {
         console.warn("MediaCache: finalizeMuxingAndDownload called with no entry.");
         return;
@@ -502,9 +547,9 @@ async function finalizeMuxingAndDownload(entry) {
         if (!entry.muxer) {
             console.log("MediaCache: Muxer not yet initialized for", entry.id, "initializing now.");
             const muxerInitialized = await initMuxer(entry);
+            console.log("MediaCache: initMuxer outcome for", entry.id, ":", muxerInitialized);
             if (!muxerInitialized || !entry.muxer) {
                 console.warn("MediaCache: Muxer initialization failed for", entry.id, "Falling back to individual downloads.");
-                // Restore original data for fallback
                 if (entry.video) entry.video.data = originalVideoData;
                 if (entry.audio) entry.audio.data = originalAudioData;
                 if (entry.video?.data?.length > 0) singleDownload(entry.id, 'video');
@@ -513,16 +558,20 @@ async function finalizeMuxingAndDownload(entry) {
             }
         }
 
-        console.log("MediaCache: Starting muxing for entry:", entry.id);
+        console.log("MediaCache: Attempting muxing for entry:", entry.id);
+
+        console.log("MediaCache: Starting muxing for entry:", entry.id); // This log seems redundant with the one above. Keeping one.
 
         try {
             // Feed video chunks
+            console.log(`MediaCache: [Entry ${entry.id}] Feeding ${originalVideoData.length} video chunks to muxer.`);
             for (const chunk of entry.video.data) { // Use current data for feeding
                 if (!entry.muxer) throw new Error("Muxer became null during video chunk processing.");
                 entry.muxer.addVideoChunkRaw(chunk.buffer, chunk.type, chunk.timestamp, chunk.duration);
             }
 
             // Feed audio chunks
+            console.log(`MediaCache: [Entry ${entry.id}] Feeding ${originalAudioData.length} audio chunks to muxer.`);
             for (const chunk of entry.audio.data) { // Use current data for feeding
                 if (!entry.muxer) throw new Error("Muxer became null during audio chunk processing.");
                 entry.muxer.addAudioChunkRaw(chunk.buffer, chunk.type, chunk.timestamp, chunk.duration);
@@ -532,6 +581,8 @@ async function finalizeMuxingAndDownload(entry) {
 
             entry.muxer.finalize();
             const { buffer } = entry.muxer.target;
+            const blobForLog = new Blob([buffer], { type: 'video/mp4' }); // For logging size
+            console.log(`MediaCache: [Entry ${entry.id}] Muxing finalized. Blob size: ${blobForLog.size}`);
 
             // Muxing successful, now clear original data arrays in the entry
             if (entry.video) entry.video.data = [];
