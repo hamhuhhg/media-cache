@@ -67,10 +67,11 @@
                             target: { tabId: tab.id },
                             files: ["bridge.js"]
         });
-        // Inject mp4-muxer.js first
+        // Inject mp4-muxer.js first, into the MAIN world
         await browserToUse.scripting.executeScript({
             target: { tabId: tab.id },
-            files: ["lib/mp4-muxer.js"]
+            files: ["lib/mp4-muxer.js"],
+            world: "MAIN" // Added this line
         });
         // Then inject script.js
                         await browserToUse.scripting.executeScript({
