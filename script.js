@@ -131,55 +131,112 @@
         return file;
     }
 
-    function parseMimeType(mimeTypeStr) { // Corrected function name from parseMineType to parseMimeType
-        if (!mimeTypeStr) return null;
+function parseMimeType(mimeTypeStr) {
+    if (!mimeTypeStr || typeof mimeTypeStr !== 'string') {
+        console.warn("MediaCache: parseMimeType received invalid input:", mimeTypeStr);
+        return null;
+    }
 
-        const result = {
-            type: null, // 'video' or 'audio'
-            codec: null, // 'avc', 'h264', 'aac', 'opus', 'vp9', 'av1', etc.
-            rawCodecString: null, // e.g., "avc1.42001f"
-            timescale: null, // Typically from track, not mime directly
-            width: null,
-            height: null,
-            numberOfChannels: null,
-            sampleRate: null,
-        };
+    const result = {
+        type: null, // 'video' or 'audio'
+        codec: null, // 'avc', 'hevc', 'vp9', 'av1', 'aac', 'opus', 'mp3' etc.
+        rawCodecString: null, // e.g., "avc1.42001f"
+        // Optional fields, attempt to populate if easily available
+        timescale: null,
+        width: null,
+        height: null,
+        numberOfChannels: null,
+        sampleRate: null,
+    };
 
-        const [mainType, paramsStr] = mimeTypeStr.split(';');
-        if (mainType.startsWith('video/')) result.type = 'video';
-        if (mainType.startsWith('audio/')) result.type = 'audio';
+    const parts = mimeTypeStr.toLowerCase().split(';'); // Convert to lowercase early
+    const mainType = parts[0].trim();
 
-        if (paramsStr) {
-            const codecsMatch = paramsStr.match(/codecs="([^"]+)"/);
-            if (codecsMatch && codecsMatch[1]) {
-                result.rawCodecString = codecsMatch[1];
-                // Simplified codec extraction. This needs to be robust.
-                const codec = result.rawCodecString.split('.')[0];
-                if (codec.startsWith('avc') || codec === 'h264') result.codec = 'avc';
-                else if (codec.startsWith('hvc') || codec.startsWith('hev')) result.codec = 'hevc';
-                else if (codec.startsWith('vp09') || codec === 'vp9') result.codec = 'vp9';
-                else if (codec.startsWith('av01') || codec === 'av1') result.codec = 'av1';
-                else if (codec.startsWith('mp4a')) result.codec = 'aac';
-                else if (codec === 'opus') result.codec = 'opus';
-                else result.codec = codec; // Fallback
+    if (mainType.startsWith('video/')) result.type = 'video';
+    if (mainType.startsWith('audio/')) result.type = 'audio';
+
+    let codecParamStr = "";
+    for (let i = 1; i < parts.length; i++) {
+        if (parts[i].trim().startsWith('codecs=')) {
+            codecParamStr = parts[i].trim();
+            break;
+        }
+    }
+
+    if (codecParamStr) {
+        const codecsMatch = codecParamStr.match(/codecs="?([^"]+)"?/); // Made quote optional for flexibility
+        if (codecsMatch && codecsMatch[1]) {
+            result.rawCodecString = codecsMatch[1];
+            // Handle potentially multiple comma-separated codecs, prioritize video/audio specific
+            let potentialCodecs = result.rawCodecString.split(',').map(c => c.trim());
+
+            let chosenCodecStr = potentialCodecs[0]; // Default to first if no better match
+            if (result.type === 'video') {
+                chosenCodecStr = potentialCodecs.find(c =>
+                    c.startsWith('avc1') || c.startsWith('avc3') || c.startsWith('hvc1') || c.startsWith('hev1') ||
+                    c.startsWith('vp09') || c.startsWith('vp9') || c.startsWith('av01') || c === 'h264'
+                ) || potentialCodecs[0];
+            } else if (result.type === 'audio') {
+                chosenCodecStr = potentialCodecs.find(c =>
+                    c.startsWith('mp4a') || c === 'opus' || c === 'mp3'
+                ) || potentialCodecs[0];
+            }
+
+            result.rawCodecString = chosenCodecStr; // Store the most relevant one found
+
+            // More robust codec mapping
+            if (chosenCodecStr.startsWith('avc1') || chosenCodecStr.startsWith('avc3') || chosenCodecStr === 'h264') {
+                result.codec = 'avc';
+            } else if (chosenCodecStr.startsWith('hvc1') || chosenCodecStr.startsWith('hev1')) {
+                result.codec = 'hevc';
+            } else if (chosenCodecStr.startsWith('vp09') || chosenCodecStr === 'vp9') {
+                result.codec = 'vp9';
+            } else if (chosenCodecStr.startsWith('av01')) {
+                result.codec = 'av1';
+            } else if (chosenCodecStr.startsWith('mp4a')) { // e.g., mp4a.40.2, mp4a.40.5, mp4a.67
+                result.codec = 'aac';
+            } else if (chosenCodecStr === 'opus') {
+                result.codec = 'opus';
+            } else if (chosenCodecStr === 'vorbis') {
+                result.codec = 'vorbis'; // common in webm audio
+            } else if (chosenCodecStr === 'mp3' || chosenCodecStr === 'mpga') {
+                result.codec = 'mp3';
+            } else {
+                result.codec = chosenCodecStr.split('.')[0];
+                console.warn("MediaCache: parseMimeType - Unknown specific codec, using fallback:", result.codec, "from raw:", chosenCodecStr);
             }
         }
-
-        if (!result.codec && result.type === 'audio') {
-            const simpleCodec = mainType.split('/')[1];
-            if (simpleCodec === 'opus') result.codec = 'opus';
-        }
-        if (!result.codec && result.type === 'video') {
-             const simpleCodec = mainType.split('/')[1];
-             if (simpleCodec === 'webm' && result.rawCodecString && result.rawCodecString.startsWith('vp')) {
-                 // Handled by rawCodecString logic already
-             } else if (simpleCodec === 'mp4' && result.rawCodecString && (result.rawCodecString.startsWith('avc') || result.rawCodecString.startsWith('hvc'))) {
-                // Handled
-             }
-        }
-        console.log("MediaCache: parseMimeType input:", mimeTypeStr, "output:", result);
-        return result;
     }
+
+    if (!result.codec && result.type === 'audio') {
+        const audioTypeSuffix = mainType.substring('audio/'.length);
+        if (audioTypeSuffix === 'opus') result.codec = 'opus';
+        else if (audioTypeSuffix === 'aac' || audioTypeSuffix === 'aacp') result.codec = 'aac';
+        else if (audioTypeSuffix === 'mpeg' || audioTypeSuffix === 'mp3') result.codec = 'mp3';
+        else if (audioTypeSuffix === 'vorbis') result.codec = 'vorbis';
+    }
+    if (!result.codec && result.type === 'video') {
+        const videoTypeSuffix = mainType.substring('video/'.length);
+        if (videoTypeSuffix === 'h264') result.codec = 'avc';
+    }
+
+    for (let i = 1; i < parts.length; i++) {
+        const param = parts[i].trim();
+        if (param.startsWith('width=')) result.width = parseInt(param.substring('width='.length));
+        else if (param.startsWith('height=')) result.height = parseInt(param.substring('height='.length));
+        else if (param.startsWith('samplerate=')) result.sampleRate = parseInt(param.substring('samplerate='.length));
+        else if (param.startsWith('channels=')) result.numberOfChannels = parseInt(param.substring('channels='.length));
+    }
+
+    result.width = Number.isFinite(result.width) ? result.width : null;
+    result.height = Number.isFinite(result.height) ? result.height : null;
+    result.sampleRate = Number.isFinite(result.sampleRate) ? result.sampleRate : null;
+    result.numberOfChannels = Number.isFinite(result.numberOfChannels) ? result.numberOfChannels : null;
+
+
+    console.log("MediaCache: parseMimeType input:", mimeTypeStr, "output:", JSON.parse(JSON.stringify(result)));
+    return result;
+}
 
     /**
      * Edit the MediaSource prototype. Basically, make this script work.
@@ -673,7 +730,7 @@ async function finalizeMuxingAndDownload(entry) {
         if (streamType && currentItem[streamType]) { // streamType is 'video' or 'audio'
             targetStreamInfo = currentItem[streamType];
             isVideo = streamType === 'video';
-            titleToUse = `${currentItem.title} [${streamType} only].${targetStreamInfo.codec || (isVideo ? 'vid' : 'aud')}`;
+            // titleToUse will be set later with new extension logic
         } else if (currentItem.isMuxedCandidate) {
             console.log("MediaCache: Muxing candidate, download via main process later.", currentItem.id);
             return;
@@ -707,7 +764,67 @@ async function finalizeMuxingAndDownload(entry) {
             return;
         }
 
-        const blob = new Blob(buffersToDownload, { type: targetStreamInfo.mimeType || (isVideo ? 'video/mp4' : 'audio/mp4') });
+    let fileExtension = "media"; // Default fallback extension
+    if (targetStreamInfo.codec) {
+        switch (targetStreamInfo.codec.toLowerCase()) { // Use toLowerCase for safety
+            case 'avc':
+            case 'h264':
+                fileExtension = 'mp4';
+                break;
+            case 'hevc':
+            case 'h265':
+                fileExtension = 'mp4';
+                break;
+            case 'vp9':
+                fileExtension = 'webm';
+                break;
+            case 'av1':
+                fileExtension = 'mp4';
+                break;
+            case 'aac':
+                fileExtension = 'aac';
+                break;
+            case 'opus':
+                fileExtension = 'opus';
+                break;
+            case 'mp3':
+                fileExtension = 'mp3';
+                break;
+            case 'vorbis':
+                fileExtension = 'ogg';
+                break;
+            default:
+                fileExtension = targetStreamInfo.codec.length <= 4 ? targetStreamInfo.codec : 'media';
+                console.warn(`MediaCache: singleDownload - Unhandled codec '${targetStreamInfo.codec}' for extension, using '.${fileExtension}'`);
+        }
+    } else {
+        console.warn(`MediaCache: singleDownload - Codec is null for ${streamType}, using default extension '.media'`);
+    }
+    fileExtension = fileExtension.replace(/[^a-z0-9]/gi, '_').toLowerCase();
+    titleToUse = `${currentItem.title} [${streamType} only].${fileExtension}`;
+
+
+    let blobMimeType = isVideo ? 'video/mp4' : 'audio/aac'; // Sensible general defaults
+    if (targetStreamInfo.mimeType) {
+        blobMimeType = targetStreamInfo.mimeType;
+    } else if (targetStreamInfo.codec) {
+        const codecLower = targetStreamInfo.codec.toLowerCase();
+        if (isVideo) {
+            if (['avc', 'h264', 'hevc', 'h265', 'av1'].includes(codecLower)) blobMimeType = `video/mp4`;
+            else if (codecLower === 'vp9') blobMimeType = `video/webm`;
+            else blobMimeType = `video/${codecLower}`;
+
+        } else { // Audio
+             if (codecLower === 'aac') blobMimeType = 'audio/aac';
+             else if (codecLower === 'opus') blobMimeType = 'audio/opus';
+             else if (codecLower === 'mp3') blobMimeType = 'audio/mpeg';
+             else if (codecLower === 'vorbis') blobMimeType = 'audio/ogg';
+             else blobMimeType = `audio/${codecLower}`;
+        }
+    }
+    console.log(`MediaCache: singleDownload - Using Blob MIME type: ${blobMimeType} for ${titleToUse}`);
+    const blob = new Blob(buffersToDownload, { type: blobMimeType });
+
         const a = Object.assign(document.createElement("a"), {
             download: titleToUse,
             href: URL.createObjectURL(blob)
