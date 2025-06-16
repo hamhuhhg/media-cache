@@ -405,14 +405,13 @@ function parseMimeType(mimeTypeStr) {
 
             // Override appendBuffer for this specific SourceBuffer instance
             const originalAppendBuffer = sourceBuffer.appendBuffer;
-            sourceBuffer.appendBuffer = function (arrayBufferData) { // Renamed 'data' to 'arrayBufferData' for clarity
-                const currentEntry = arr.find(item => item.id === entry.id); // entry.id from outer scope
+            sourceBuffer.appendBuffer = function (arrayBufferData) { // This is an anonymous function assigned to sourceBuffer.appendBuffer
+                const currentEntry = arr.find(item => item.id === entry.id); // 'entry' is from the outer scope of addSourceBuffer
                 if (currentEntry) {
                     currentEntry.lastActivity = Date.now();
-                    const targetStream = currentEntry[parsedMime.type]; // parsedMime.type from outer scope
+                    const targetStream = currentEntry[parsedMime.type]; // 'parsedMime' is from the outer scope of addSourceBuffer
 
                     if (targetStream) {
-                        // --- START OF ISOBoxer fMP4 PARSING LOGIC ---
                         let usingFmp4Metadata = false;
                         let actualChunkTimestamp = targetStream.currentTimeInMicros;
                         let actualChunkDuration = 0;
@@ -426,31 +425,30 @@ function parseMimeType(mimeTypeStr) {
                             console.warn(`MediaCache: [Inst: ${scriptInstanceId}][Entry ${currentEntry.id}] appendBuffer received unexpected data type:`, arrayBufferData);
                         }
 
+                        // --- START OF CORRECTED ISOBoxer fMP4 PARSING LOGIC ---
                         if (typeof ISOBoxer !== 'undefined' && ISOBoxer.parseBuffer && arrayBufferData && arrayBufferData.byteLength > 0) {
                             try {
-                                let bufferToParse = null; // Initialize to null
+                                let bufferToParse = null;
                                 if (arrayBufferData instanceof ArrayBuffer) {
-                                    console.log(`MediaCache: [Inst: ${scriptInstanceId}][Entry ${currentEntry.id}] appendBuffer received direct ArrayBuffer. Length: ${arrayBufferData.byteLength}`);
                                     bufferToParse = arrayBufferData.slice(0);
                                 } else if (ArrayBuffer.isView(arrayBufferData)) {
-                                    console.log(`MediaCache: [Inst: ${scriptInstanceId}][Entry ${currentEntry.id}] appendBuffer received ArrayBufferView (${arrayBufferData.constructor.name}). Length: ${arrayBufferData.byteLength}, Offset: ${arrayBufferData.byteOffset}, BufferLength: ${arrayBufferData.buffer.byteLength}`);
                                     bufferToParse = arrayBufferData.buffer.slice(arrayBufferData.byteOffset, arrayBufferData.byteOffset + arrayBufferData.byteLength);
                                 } else {
-                                    console.warn(`MediaCache: [Inst: ${scriptInstanceId}][Entry ${currentEntry.id}] appendBuffer received unexpected data type:`, arrayBufferData, ". Skipping parse.");
+                                    console.warn(`MediaCache: [Inst: ${scriptInstanceId}][Entry ${currentEntry.id}] Data for ISOBoxer is not an ArrayBuffer or ArrayBufferView. Type: ${typeof arrayBufferData}. Skipping parse.`);
                                 }
 
                                 if (bufferToParse) {
-                                    const parsedBuffer = ISOBoxer.parseBuffer(bufferToParse);
-                                    const moof = parsedBuffer.fetch('moof');
+                                    const parsedBufferRoot = ISOBoxer.parseBuffer(bufferToParse);
+                                    const moof = parsedBufferRoot.fetch('moof');
 
-                                    if (moof) {
+                                    if (moof && moof.boxes) {
                                         console.log(`MediaCache: [Inst: ${scriptInstanceId}][Entry ${currentEntry.id}] Found 'moof' box. Attempting fMP4 metadata extraction.`);
-                                        const traf = moof.fetch('traf');
+                                        const traf = moof.boxes.find(box => box.type === 'traf');
 
-                                        if (traf) {
-                                            const tfdt = traf.fetch('tfdt');
-                                            const trun = traf.fetch('trun');
-                                            const tfhd = traf.fetch('tfhd');
+                                        if (traf && traf.boxes) {
+                                            const tfdt = traf.boxes.find(box => box.type === 'tfdt');
+                                            const trun = traf.boxes.find(box => box.type === 'trun');
+                                            const tfhd = traf.boxes.find(box => box.type === 'tfhd');
 
                                             if (tfdt && trun && tfhd) {
                                                 const trackTimescale = targetStream.timescale || 90000;
@@ -462,27 +460,27 @@ function parseMimeType(mimeTypeStr) {
                                                     console.warn(`MediaCache: [Inst: ${scriptInstanceId}][Entry ${currentEntry.id}] fMP4 tfdt.baseMediaDecodeTime not found/invalid, using accumulated for this segment: ${actualChunkTimestamp}µs`);
                                                 }
 
-                                                let currentCalculatedDurationInTrackTimescale = 0;
+                                                let calculatedDurationInTrackTimescale = 0;
                                                 if (trun.samples && typeof trun.sample_count === 'number' && trun.sample_count > 0) {
                                                     if (trun.flags & 0x000100) {
                                                         for (let i = 0; i < trun.sample_count; i++) {
                                                             if (trun.samples[i] && typeof trun.samples[i].sample_duration === 'number') {
-                                                                currentCalculatedDurationInTrackTimescale += trun.samples[i].sample_duration;
+                                                                calculatedDurationInTrackTimescale += trun.samples[i].sample_duration;
                                                             } else if (tfhd.flags & 0x000008 && typeof tfhd.default_sample_duration === 'number') {
-                                                                currentCalculatedDurationInTrackTimescale += tfhd.default_sample_duration;
+                                                                calculatedDurationInTrackTimescale += tfhd.default_sample_duration;
                                                             } else {
                                                                  console.warn(`MediaCache: [Inst: ${scriptInstanceId}][Entry ${currentEntry.id}] fMP4 trun sample ${i} missing duration, and no default_sample_duration in tfhd.`);
                                                             }
                                                         }
                                                     } else if (tfhd.flags & 0x000008 && typeof tfhd.default_sample_duration === 'number') {
-                                                        currentCalculatedDurationInTrackTimescale = tfhd.default_sample_duration * trun.sample_count;
+                                                        calculatedDurationInTrackTimescale = tfhd.default_sample_duration * trun.sample_count;
                                                     } else {
-                                                       console.warn(`MediaCache: [Inst: ${scriptInstanceId}][Entry ${currentEntry.id}] fMP4 trun samples lack individual durations and no default_sample_duration in tfhd for ${trun.sample_count} samples.`);
+                                                        console.warn(`MediaCache: [Inst: ${scriptInstanceId}][Entry ${currentEntry.id}] fMP4 trun samples lack individual durations and no default_sample_duration in tfhd for ${trun.sample_count} samples.`);
                                                     }
                                                 }
 
-                                                if (currentCalculatedDurationInTrackTimescale > 0) {
-                                                    actualChunkDuration = Math.round((currentCalculatedDurationInTrackTimescale / trackTimescale) * 1000000);
+                                                if (calculatedDurationInTrackTimescale > 0) {
+                                                    actualChunkDuration = Math.round((calculatedDurationInTrackTimescale / trackTimescale) * 1000000);
                                                     console.log(`MediaCache: [Inst: ${scriptInstanceId}][Entry ${currentEntry.id}] fMP4 trun calculated total duration: ${actualChunkDuration}µs for ${trun.sample_count} samples.`);
                                                 } else {
                                                     console.warn(`MediaCache: [Inst: ${scriptInstanceId}][Entry ${currentEntry.id}] fMP4 trun duration could not be calculated (or was zero). Fallback estimation will be used for this chunk's duration.`);
@@ -511,14 +509,14 @@ function parseMimeType(mimeTypeStr) {
                                                     usingFmp4Metadata = true;
                                                 }
                                             } else {
-                                                console.warn(`MediaCache: [Inst: ${scriptInstanceId}][Entry ${currentEntry.id}] 'moof' box found, but essential sub-boxes ('tfdt', 'trun', 'tfhd') are missing. Cannot use fMP4 metadata for timing/duration.`);
+                                                console.warn(`MediaCache: [Inst: ${scriptInstanceId}][Entry ${currentEntry.id}] 'moof' box found, but essential sub-boxes ('tfdt', 'trun', 'tfhd') are missing within 'traf'. Cannot use fMP4 metadata.`);
                                             }
                                         } else {
                                              console.warn(`MediaCache: [Inst: ${scriptInstanceId}][Entry ${currentEntry.id}] 'moof' box found, but missing 'traf' (Track Fragment). Cannot use fMP4 metadata.`);
                                         }
                                     } else {
-                                        const ftyp = parsedBuffer.fetch('ftyp');
-                                        const moov = parsedBuffer.fetch('moov');
+                                        const ftyp = parsedBufferRoot.fetch('ftyp');
+                                        const moov = parsedBufferRoot.fetch('moov');
                                         if (ftyp && moov) {
                                             console.log(`MediaCache: [Inst: ${scriptInstanceId}][Entry ${currentEntry.id}] Received init segment (ftyp/moov). Skipping add to muxer data queue.`);
                                             originalAppendBuffer.call(this, arrayBufferData);
@@ -532,9 +530,8 @@ function parseMimeType(mimeTypeStr) {
                                 usingFmp4Metadata = false;
                             }
                         }
-                        // --- END OF ISOBoxer fMP4 PARSING LOGIC ---
+                        // --- END OF CORRECTED ISOBoxer fMP4 PARSING LOGIC ---
 
-                        // Timestamp, Duration, Type determination
                         let timestampToUse;
                         let durationToUse;
                         let chunkTypeToUse;
@@ -545,7 +542,6 @@ function parseMimeType(mimeTypeStr) {
                             chunkTypeToUse = determinedChunkType;
                             targetStream.currentTimeInMicros = timestampToUse + durationToUse;
                         } else {
-                            // Fallback to existing estimation logic if fMP4 parsing failed or not applicable
                             timestampToUse = targetStream.currentTimeInMicros;
 
                             if (targetStream.frameCount === 0) {
