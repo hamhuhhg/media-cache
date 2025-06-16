@@ -428,13 +428,15 @@ function parseMimeType(mimeTypeStr) {
 
                         if (typeof ISOBoxer !== 'undefined' && ISOBoxer.parseBuffer && arrayBufferData && arrayBufferData.byteLength > 0) {
                             try {
-                                let bufferToParse;
+                                let bufferToParse = null; // Initialize to null
                                 if (arrayBufferData instanceof ArrayBuffer) {
+                                    console.log(`MediaCache: [Inst: ${scriptInstanceId}][Entry ${currentEntry.id}] appendBuffer received direct ArrayBuffer. Length: ${arrayBufferData.byteLength}`);
                                     bufferToParse = arrayBufferData.slice(0);
                                 } else if (ArrayBuffer.isView(arrayBufferData)) {
+                                    console.log(`MediaCache: [Inst: ${scriptInstanceId}][Entry ${currentEntry.id}] appendBuffer received ArrayBufferView (${arrayBufferData.constructor.name}). Length: ${arrayBufferData.byteLength}, Offset: ${arrayBufferData.byteOffset}, BufferLength: ${arrayBufferData.buffer.byteLength}`);
                                     bufferToParse = arrayBufferData.buffer.slice(arrayBufferData.byteOffset, arrayBufferData.byteOffset + arrayBufferData.byteLength);
                                 } else {
-                                    console.warn(`MediaCache: [Inst: ${scriptInstanceId}][Entry ${currentEntry.id}] Data for ISOBoxer is not an ArrayBuffer or ArrayBufferView. Skipping parse.`);
+                                    console.warn(`MediaCache: [Inst: ${scriptInstanceId}][Entry ${currentEntry.id}] appendBuffer received unexpected data type:`, arrayBufferData, ". Skipping parse.");
                                 }
 
                                 if (bufferToParse) {
@@ -443,107 +445,88 @@ function parseMimeType(mimeTypeStr) {
 
                                     if (moof) {
                                         console.log(`MediaCache: [Inst: ${scriptInstanceId}][Entry ${currentEntry.id}] Found 'moof' box. Attempting fMP4 metadata extraction.`);
-                                    const traf = moof.fetch('traf');
+                                        const traf = moof.fetch('traf');
 
-                                    if (traf) {
-                                        const tfdt = traf.fetch('tfdt');
-                                        const trun = traf.fetch('trun');
-                                        const tfhd = traf.fetch('tfhd');
+                                        if (traf) {
+                                            const tfdt = traf.fetch('tfdt');
+                                            const trun = traf.fetch('trun');
+                                            const tfhd = traf.fetch('tfhd');
 
-                                        if (tfdt && trun && tfhd) {
-                                            const trackTimescale = targetStream.timescale || 90000;
+                                            if (tfdt && trun && tfhd) {
+                                                const trackTimescale = targetStream.timescale || 90000;
 
-                                            if (tfdt.baseMediaDecodeTime >= 0) {
-                                                actualChunkTimestamp = (tfdt.baseMediaDecodeTime / trackTimescale) * 1000000;
-                                                console.log(`MediaCache: [Inst: ${scriptInstanceId}][Entry ${currentEntry.id}] fMP4 tfdt.baseMediaDecodeTime: ${tfdt.baseMediaDecodeTime} (ts: ${trackTimescale}), timestamp: ${actualChunkTimestamp}µs`);
-                                            } else {
-                                                console.warn(`MediaCache: [Inst: ${scriptInstanceId}][Entry ${currentEntry.id}] fMP4 tfdt.baseMediaDecodeTime not found or invalid, using accumulated timestamp.`);
-                                            }
-
-                                            let calculatedDurationInTrackTimescale = 0;
-                                            if (trun.samples && trun.sample_count > 0) {
-                                                if (trun.flags & 0x000100) {
-                                                    for (let i = 0; i < trun.sample_count; i++) {
-                                                        if (trun.samples[i] && typeof trun.samples[i].sample_duration === 'number') {
-                                                            calculatedDurationInTrackTimescale += trun.samples[i].sample_duration;
-                                                        } else if (tfhd.flags & 0x000008) {
-                                                            calculatedDurationInTrackTimescale += tfhd.default_sample_duration;
-                                                        } else {
-                                                             console.warn(`MediaCache: [Inst: ${scriptInstanceId}][Entry ${currentEntry.id}] fMP4 trun sample ${i} missing duration, and no default in tfhd.`);
-                                                        }
-                                                    }
-                                                } else if (tfhd.flags & 0x000008) {
-                                                    calculatedDurationInTrackTimescale = tfhd.default_sample_duration * trun.sample_count;
+                                                if (tfdt.baseMediaDecodeTime !== undefined && tfdt.baseMediaDecodeTime >= 0) {
+                                                    actualChunkTimestamp = (tfdt.baseMediaDecodeTime / trackTimescale) * 1000000;
+                                                    console.log(`MediaCache: [Inst: ${scriptInstanceId}][Entry ${currentEntry.id}] fMP4 tfdt.baseMediaDecodeTime: ${tfdt.baseMediaDecodeTime} (ts: ${trackTimescale}), timestamp: ${actualChunkTimestamp}µs`);
+                                                } else {
+                                                    console.warn(`MediaCache: [Inst: ${scriptInstanceId}][Entry ${currentEntry.id}] fMP4 tfdt.baseMediaDecodeTime not found/invalid, using accumulated for this segment: ${actualChunkTimestamp}µs`);
                                                 }
-                                            }
 
-                                            if (calculatedDurationInTrackTimescale > 0) {
-                                                actualChunkDuration = (calculatedDurationInTrackTimescale / trackTimescale) * 1000000;
-                                                console.log(`MediaCache: [Inst: ${scriptInstanceId}][Entry ${currentEntry.id}] fMP4 trun calculated total duration: ${actualChunkDuration}µs for ${trun.sample_count} samples.`);
-                                            } else {
-                                                console.warn(`MediaCache: [Inst: ${scriptInstanceId}][Entry ${currentEntry.id}] fMP4 trun duration could not be calculated, using estimation.`);
-                                            }
-
-                                            // ... (duration calculation logic from existing code) ...
-                                            let calculatedDurationInTrackTimescale = 0;
-                                            if (trun.samples && trun.sample_count > 0) {
-                                                if (trun.flags & 0x000100) { // sample_duration_present
-                                                    for (let i = 0; i < trun.sample_count; i++) {
-                                                        if (trun.samples[i] && typeof trun.samples[i].sample_duration === 'number') {
-                                                            calculatedDurationInTrackTimescale += trun.samples[i].sample_duration;
-                                                        } else if (tfhd.flags & 0x000008) { // default_sample_duration_present in tfhd
-                                                            calculatedDurationInTrackTimescale += tfhd.default_sample_duration;
+                                                let currentCalculatedDurationInTrackTimescale = 0;
+                                                if (trun.samples && typeof trun.sample_count === 'number' && trun.sample_count > 0) {
+                                                    if (trun.flags & 0x000100) {
+                                                        for (let i = 0; i < trun.sample_count; i++) {
+                                                            if (trun.samples[i] && typeof trun.samples[i].sample_duration === 'number') {
+                                                                currentCalculatedDurationInTrackTimescale += trun.samples[i].sample_duration;
+                                                            } else if (tfhd.flags & 0x000008 && typeof tfhd.default_sample_duration === 'number') {
+                                                                currentCalculatedDurationInTrackTimescale += tfhd.default_sample_duration;
+                                                            } else {
+                                                                 console.warn(`MediaCache: [Inst: ${scriptInstanceId}][Entry ${currentEntry.id}] fMP4 trun sample ${i} missing duration, and no default_sample_duration in tfhd.`);
+                                                            }
                                                         }
+                                                    } else if (tfhd.flags & 0x000008 && typeof tfhd.default_sample_duration === 'number') {
+                                                        currentCalculatedDurationInTrackTimescale = tfhd.default_sample_duration * trun.sample_count;
+                                                    } else {
+                                                       console.warn(`MediaCache: [Inst: ${scriptInstanceId}][Entry ${currentEntry.id}] fMP4 trun samples lack individual durations and no default_sample_duration in tfhd for ${trun.sample_count} samples.`);
                                                     }
-                                                } else if (tfhd.flags & 0x000008) { // default_sample_duration_present in tfhd
-                                                    calculatedDurationInTrackTimescale = tfhd.default_sample_duration * trun.sample_count;
                                                 }
-                                            }
-                                            if (calculatedDurationInTrackTimescale > 0) {
-                                                actualChunkDuration = (calculatedDurationInTrackTimescale / trackTimescale) * 1000000;
-                                            }
-                                            // --- End duration calculation ---
 
-                                            // Refined Keyframe Detection from fMP4 Flags
-                                            // A sample is a sync sample (keyframe) if sample_is_non_sync_sample is 0.
-                                            // This flag is bit 25 (0-indexed) of sample_flags. (0x02000000 when shifted for a 32-bit word)
-                                            // We check the first sample's flags if available, or default flags.
-                                            let isKeyFromFlags = false;
-                                            if (trun.flags & 0x000004 && trun.first_sample_flags !== undefined) { // first_sample_flags_present
-                                                isKeyFromFlags = (trun.first_sample_flags & 0x02000000) === 0;
-                                                console.log(`MediaCache: [Inst: ${scriptInstanceId}][Entry ${currentEntry.id}] fMP4 trun.first_sample_flags (${trun.first_sample_flags.toString(16)}) indicates keyframe: ${isKeyFromFlags}`);
-                                            } else if (tfhd.flags & 0x000020 && tfhd.default_sample_flags !== undefined) { // default_sample_flags_present in tfhd
-                                                isKeyFromFlags = (tfhd.default_sample_flags & 0x02000000) === 0;
-                                                console.log(`MediaCache: [Inst: ${scriptInstanceId}][Entry ${currentEntry.id}] fMP4 tfhd.default_sample_flags (${tfhd.default_sample_flags.toString(16)}) indicates keyframe: ${isKeyFromFlags}`);
-                                            } else if (trun.sample_count > 0 && trun.samples && trun.samples[0] && (trun.flags & 0x000800) && trun.samples[0].sample_flags !== undefined) { // sample_flags_present for first sample
-                                                isKeyFromFlags = (trun.samples[0].sample_flags & 0x02000000) === 0;
-                                                console.log(`MediaCache: [Inst: ${scriptInstanceId}][Entry ${currentEntry.id}] fMP4 trun.samples[0].sample_flags (${trun.samples[0].sample_flags.toString(16)}) indicates keyframe: ${isKeyFromFlags}`);
-                                            }
+                                                if (currentCalculatedDurationInTrackTimescale > 0) {
+                                                    actualChunkDuration = Math.round((currentCalculatedDurationInTrackTimescale / trackTimescale) * 1000000);
+                                                    console.log(`MediaCache: [Inst: ${scriptInstanceId}][Entry ${currentEntry.id}] fMP4 trun calculated total duration: ${actualChunkDuration}µs for ${trun.sample_count} samples.`);
+                                                } else {
+                                                    console.warn(`MediaCache: [Inst: ${scriptInstanceId}][Entry ${currentEntry.id}] fMP4 trun duration could not be calculated (or was zero). Fallback estimation will be used for this chunk's duration.`);
+                                                }
 
+                                                let isKeyFromFlags = false;
+                                                if (trun.flags & 0x000004 && trun.first_sample_flags !== undefined) {
+                                                    isKeyFromFlags = (trun.first_sample_flags & 0x02000000) === 0;
+                                                    console.log(`MediaCache: [Inst: ${scriptInstanceId}][Entry ${currentEntry.id}] fMP4 trun.first_sample_flags (0x${trun.first_sample_flags.toString(16)}) indicates keyframe: ${isKeyFromFlags}`);
+                                                } else if (tfhd.flags & 0x000020 && tfhd.default_sample_flags !== undefined) {
+                                                    isKeyFromFlags = (tfhd.default_sample_flags & 0x02000000) === 0;
+                                                    console.log(`MediaCache: [Inst: ${scriptInstanceId}][Entry ${currentEntry.id}] fMP4 tfhd.default_sample_flags (0x${tfhd.default_sample_flags.toString(16)}) indicates keyframe: ${isKeyFromFlags}`);
+                                                } else if (trun.sample_count > 0 && trun.samples && trun.samples[0] && (trun.flags & 0x000800) && typeof trun.samples[0].sample_flags === 'number') {
+                                                    isKeyFromFlags = (trun.samples[0].sample_flags & 0x02000000) === 0;
+                                                    console.log(`MediaCache: [Inst: ${scriptInstanceId}][Entry ${currentEntry.id}] fMP4 trun.samples[0].sample_flags (0x${trun.samples[0].sample_flags.toString(16)}) indicates keyframe: ${isKeyFromFlags}`);
+                                                }
 
-                                            if (targetStream.frameCount === 0 || isKeyFromFlags) {
-                                                determinedChunkType = 'key';
+                                                if (targetStream.frameCount === 0 || isKeyFromFlags) {
+                                                    determinedChunkType = 'key';
+                                                } else {
+                                                    determinedChunkType = 'delta';
+                                                }
+                                                console.log(`MediaCache: [Inst: ${scriptInstanceId}][Entry ${currentEntry.id}] fMP4 determined chunkType: ${determinedChunkType}`);
+
+                                                if (actualChunkDuration > 0) {
+                                                    usingFmp4Metadata = true;
+                                                }
                                             } else {
-                                                determinedChunkType = 'delta';
+                                                console.warn(`MediaCache: [Inst: ${scriptInstanceId}][Entry ${currentEntry.id}] 'moof' box found, but essential sub-boxes ('tfdt', 'trun', 'tfhd') are missing. Cannot use fMP4 metadata for timing/duration.`);
                                             }
-                                            console.log(`MediaCache: [Inst: ${scriptInstanceId}][Entry ${currentEntry.id}] fMP4 determined chunkType: ${determinedChunkType}`);
-
-                                            if (actualChunkDuration > 0) usingFmp4Metadata = true;
                                         } else {
-                                            console.warn(`MediaCache: [Inst: ${scriptInstanceId}][Entry ${currentEntry.id}] 'moof' box found, but missing 'tfdt' or 'trun' or 'tfhd'. Cannot use fMP4 metadata.`);
+                                             console.warn(`MediaCache: [Inst: ${scriptInstanceId}][Entry ${currentEntry.id}] 'moof' box found, but missing 'traf' (Track Fragment). Cannot use fMP4 metadata.`);
                                         }
                                     } else {
-                                         console.warn(`MediaCache: [Inst: ${scriptInstanceId}][Entry ${currentEntry.id}] 'moof' box found, but missing 'traf'. Cannot use fMP4 metadata.`);
+                                        const ftyp = parsedBuffer.fetch('ftyp');
+                                        const moov = parsedBuffer.fetch('moov');
+                                        if (ftyp && moov) {
+                                            console.log(`MediaCache: [Inst: ${scriptInstanceId}][Entry ${currentEntry.id}] Received init segment (ftyp/moov). Skipping add to muxer data queue.`);
+                                            originalAppendBuffer.call(this, arrayBufferData);
+                                            return;
+                                        }
+                                        console.log(`MediaCache: [Inst: ${scriptInstanceId}][Entry ${currentEntry.id}] No 'moof' box found. Not an fMP4 media segment. Using estimations.`);
                                     }
-                                } else {
-                                    const ftyp = parsedBuffer.fetch('ftyp');
-                                    const moov = parsedBuffer.fetch('moov');
-                                    if (ftyp && moov) {
-                                        console.log(`MediaCache: [Inst: ${scriptInstanceId}][Entry ${currentEntry.id}] Received init segment (ftyp/moov). Skipping add to muxer data queue.`);
-                                        return originalAppendBuffer.call(this, arrayBufferData);
-                                    }
-                                    console.log(`MediaCache: [Inst: ${scriptInstanceId}][Entry ${currentEntry.id}] No 'moof' box found. Not an fMP4 media segment. Using estimations.`);
-                                }
+                                } // end if (bufferToParse)
                             } catch (e) {
                                 console.warn(`MediaCache: [Inst: ${scriptInstanceId}][Entry ${currentEntry.id}] Error parsing ArrayBuffer with ISOBoxer:`, e, "Using estimations.");
                                 usingFmp4Metadata = false;
@@ -562,6 +545,7 @@ function parseMimeType(mimeTypeStr) {
                             chunkTypeToUse = determinedChunkType;
                             targetStream.currentTimeInMicros = timestampToUse + durationToUse;
                         } else {
+                            // Fallback to existing estimation logic if fMP4 parsing failed or not applicable
                             timestampToUse = targetStream.currentTimeInMicros;
 
                             if (targetStream.frameCount === 0) {
