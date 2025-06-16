@@ -287,6 +287,7 @@ function parseMimeType(mimeTypeStr) {
                 };
                 arr.push(entry);
                 console.log("MediaCache: Created new VIDEO entry:", entry.id, "MIME:", mimeType, "Parsed Codec:", parsedMime.codec);
+                console.log(`MediaCache: [Entry ${entry.id}] pushed to arr. Current arr size: ${arr.length}. IDs: ${arr.map(e=>e.id.substring(0,8)).join(', ')}`);
                 setTimeout(() => addTitle(entry.id, 0), 1500); // Keep title logic similar
             } else if (parsedMime.type === 'audio') {
                 // Try to associate with a recent video entry
@@ -346,6 +347,7 @@ function parseMimeType(mimeTypeStr) {
                     };
                     arr.push(entry);
                     console.log("MediaCache: Created new AUDIO-ONLY entry:", entry.id, "MIME:", mimeType, "Parsed Codec:", parsedMime.codec);
+                    console.log(`MediaCache: [Entry ${entry.id}] pushed to arr. Current arr size: ${arr.length}. IDs: ${arr.map(e=>e.id.substring(0,8)).join(', ')}`);
                     setTimeout(() => addTitle(entry.id, 0), 1500);
                 }
             }
@@ -556,31 +558,39 @@ async function initMuxer(entry) {
         return false;
     }
 
+    const videoOptions = {
+        codec: entry.video.codec === 'h264' ? 'avc' : entry.video.codec,
+        width: entry.video.width,
+        height: entry.video.height,
+        decoderConfig: {
+            colorSpace: {
+                primaries: 'bt709',
+                transfer: 'bt709',
+                matrix: 'bt709',
+                fullRange: false
+            }
+        }
+    };
+
+    const audioOptions = {
+        codec: entry.audio.codec,
+        numberOfChannels: entry.audio.numberOfChannels,
+        sampleRate: entry.audio.sampleRate,
+        decoderConfig: entry.audio.decoderConfig || null
+    };
+
     const muxerOptions = {
         target: new Mp4Muxer.ArrayBufferTarget(),
-        video: {
-            codec: entry.video.codec === 'h264' ? 'avc' : entry.video.codec,
-            width: entry.video.width,
-            height: entry.video.height,
-            decoderConfig: entry.video.decoderConfig || {
-                colorSpace: {
-                    primaries: 'bt709',
-                    transfer: 'bt709',
-                    matrix: 'bt709',
-                    fullRange: false
-                }
-            }
-        },
-        audio: {
-            codec: entry.audio.codec,
-            numberOfChannels: entry.audio.numberOfChannels,
-            sampleRate: entry.audio.sampleRate,
-            decoderConfig: entry.audio.decoderConfig || null
-        },
+        video: videoOptions,
+        audio: audioOptions,
         fastStart: 'in-memory',
         firstTimestampBehavior: 'offset'
     };
-    console.log("MediaCache: Mp4Muxer options for entry:", entry.id, JSON.parse(JSON.stringify(muxerOptions))); // Clean log
+
+    console.log("MediaCache: initMuxer - Final video options for Mp4Muxer:", JSON.parse(JSON.stringify(videoOptions)));
+    console.log("MediaCache: initMuxer - Final audio options for Mp4Muxer:", JSON.parse(JSON.stringify(audioOptions)));
+    console.log("MediaCache: Mp4Muxer options for entry:", entry.id, JSON.parse(JSON.stringify(muxerOptions)));
+
 
     try {
         entry.muxer = new Mp4Muxer.Muxer(muxerOptions);
@@ -705,8 +715,9 @@ async function finalizeMuxingAndDownload(entry) {
                  if (videoDataEmpty && audioDataEmpty) {
                     const itemIndex = arr.findIndex(item => item.id === entry.id);
                     if (itemIndex !== -1) {
-                        console.log("MediaCache: Deleting entry after processing:", entry.id);
+                        console.log(`MediaCache: [Entry ${entry.id}] attemptimg to remove from arr due to successful processing and delete_entries flag. Arr size before: ${arr.length}`);
                         arr.splice(itemIndex, 1);
+                        console.log(`MediaCache: [Entry ${entry.id}] removed. Arr size after: ${arr.length}. IDs: ${arr.map(e=>e.id.substring(0,8)).join(', ')}`);
                     }
                  } else {
                     console.log("MediaCache: Entry not deleted as data remains (muxing/download might have issues or user intervention needed).", entry.id);
@@ -729,8 +740,9 @@ async function finalizeMuxingAndDownload(entry) {
             if (videoDataEmpty && audioDataEmpty) {
                 const itemIndex = arr.findIndex(item => item.id === entry.id);
                 if (itemIndex !== -1) {
-                     console.log("MediaCache: Deleting non-muxed entry after processing:", entry.id);
-                     arr.splice(itemIndex, 1);
+                    console.log(`MediaCache: [Entry ${entry.id}] attemptimg to remove from arr due to successful processing and delete_entries flag. Arr size before: ${arr.length}`);
+                    arr.splice(itemIndex, 1);
+                    console.log(`MediaCache: [Entry ${entry.id}] removed. Arr size after: ${arr.length}. IDs: ${arr.map(e=>e.id.substring(0,8)).join(', ')}`);
                 }
             }
         }
@@ -888,7 +900,10 @@ async function finalizeMuxingAndDownload(entry) {
                 start();
                 break;
             case "stop":
+                console.log("MediaCache: Received 'stop' action. Clearing arr. Arr size before:", arr.length);
                 arr = [];
+                picker = undefined; // Also reset picker as per original logic
+                console.log("MediaCache: arr cleared. Picker reset.");
                 break;
             case "getDownloads":
                 comms.postMessage({
@@ -929,11 +944,14 @@ async function finalizeMuxingAndDownload(entry) {
                 });
                 break;
             case "downloadThis": // Download the item in the data.content (which is entry.id)
-                const itemToDownload = arr.find(item => item.id === msg.data.content);
+                const requestedId = msg.data.content;
+                console.log(`MediaCache: Received 'downloadThis' for ID: ${requestedId}. Current arr IDs: ${arr.map(e=>e.id.substring(0,8)).join(', ')}`);
+                const itemToDownload = arr.find(item => item.id === requestedId);
                 if (itemToDownload) {
+                    console.log(`MediaCache: [Entry ${requestedId}] found for downloadThis. ProcessingAttempted: ${itemToDownload.processingAttempted}`);
                     finalizeMuxingAndDownload(itemToDownload);
                 } else {
-                    console.warn("MediaCache: downloadThis - item not found", msg.data.content);
+                    console.warn(`MediaCache: downloadThis - item with ID ${requestedId} NOT FOUND in arr.`);
                 }
                 break;
             case "fileSystem":
@@ -1003,17 +1021,22 @@ async function finalizeMuxingAndDownload(entry) {
                 })()
                 break;
             case "deleteThis":
-                const itemIndex = arr.findIndex(item => item.id === msg.data.content.id);
-                if (itemIndex === -1) return;
-
+                const itemIndexDel = arr.findIndex(item => item.id === msg.data.content.id);
+                if (itemIndexDel === -1) {
+                    console.warn("MediaCache: deleteThis - item not found:", msg.data.content.id);
+                    return;
+                }
+                console.log(`MediaCache: [Entry ${msg.data.content.id}] deleteThis action. Permanent: ${msg.data.content.permanent}. Arr size before: ${arr.length}`);
                 if (msg.data.content.permanent) {
-                    if (arr[itemIndex].video && arr[itemIndex].video.writable) arr[itemIndex].video.writable.close().catch(e=>console.warn(e));
-                    if (arr[itemIndex].audio && arr[itemIndex].audio.writable) arr[itemIndex].audio.writable.close().catch(e=>console.warn(e));
+                    if (arr[itemIndexDel].video && arr[itemIndexDel].video.writable) arr[itemIndexDel].video.writable.close().catch(e=>console.warn(e));
+                    if (arr[itemIndexDel].audio && arr[itemIndexDel].audio.writable) arr[itemIndexDel].audio.writable.close().catch(e=>console.warn(e));
                     // TODO: If permanent also means deleting from FS, need file handles to call remove()
-                    arr.splice(itemIndex, 1);
+                    arr.splice(itemIndexDel, 1);
+                    console.log(`MediaCache: [Entry ${msg.data.content.id}] permanently deleted. Arr size after: ${arr.length}. IDs: ${arr.map(e=>e.id.substring(0,8)).join(', ')}`);
                 } else {
-                    if (arr[itemIndex].video) arr[itemIndex].video.data = [];
-                    if (arr[itemIndex].audio) arr[itemIndex].audio.data = [];
+                    if (arr[itemIndexDel].video) arr[itemIndexDel].video.data = [];
+                    if (arr[itemIndexDel].audio) arr[itemIndexDel].audio.data = [];
+                    console.log(`MediaCache: [Entry ${msg.data.content.id}] in-memory data cleared.`);
                 }
                 break;
             case "fsFinalize":

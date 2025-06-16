@@ -126,6 +126,7 @@
                 }
 
                 mainButton.onclick = () => {
+                    console.log(`MediaCache UI: Sending 'downloadThis' for item ID: ${item.id} to tab ID: ${selectedTabId}`);
                     browserToUse.tabs.sendMessage(selectedTabId, {
                         action: "downloadThis",
                         content: item.id
@@ -197,6 +198,7 @@
                     if (currentItems) {
                         for (const item of currentItems) {
                              if (!item) continue;
+                            console.log(`MediaCache UI: Batch sending 'downloadThis' for item ID: ${item.id} to tab ID: ${selectedTabId}`);
                             browserToUse.tabs.sendMessage(selectedTabId, { action: "downloadThis", content: item.id });
                         }
                     }
