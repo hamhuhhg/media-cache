@@ -572,7 +572,7 @@ async function initMuxer(entry) {
     }
 
     // Log the state of entry.video.decoderConfig BEFORE explicitly constructing videoOptions
-    console.log("MediaCache: initMuxer - entry.video.decoderConfig BEFORE override:", JSON.parse(JSON.stringify(entry.video.decoderConfig)));
+    console.log("MediaCache: initMuxer - entry.video.decoderConfig BEFORE override:", entry.video.decoderConfig);
 
     // Construct videoOptions with an ALWAYS NEW decoderConfig containing the default colorSpace
     const videoOptions = {
@@ -605,9 +605,9 @@ async function initMuxer(entry) {
     };
 
     // Log the final videoOptions passed to Mp4Muxer
-    console.log("MediaCache: initMuxer - Final video options FOR Mp4Muxer (explicitly constructed decoderConfig):", JSON.parse(JSON.stringify(videoOptions)));
-    console.log("MediaCache: initMuxer - Final audio options FOR Mp4Muxer:", JSON.parse(JSON.stringify(audioOptions)));
-    console.log("MediaCache: Mp4Muxer options for entry:", entry.id, JSON.parse(JSON.stringify(muxerOptions)));
+    console.log("MediaCache: initMuxer - Final video options FOR Mp4Muxer (explicitly constructed decoderConfig):", videoOptions);
+    console.log("MediaCache: initMuxer - Final audio options FOR Mp4Muxer:", audioOptions);
+    console.log("MediaCache: Mp4Muxer options for entry:", entry.id, muxerOptions);
 
 
     try {
@@ -615,7 +615,7 @@ async function initMuxer(entry) {
         console.log("MediaCache: Muxer SUCCESSIVELY initialized for entry:", entry.id);
         return true;
     } catch (e) {
-        console.error("MediaCache: initMuxer FAIL: Error during Mp4Muxer instantiation for entry:", entry.id, e, "Options were:", JSON.parse(JSON.stringify(muxerOptions)));
+        console.error("MediaCache: initMuxer FAIL: Error during Mp4Muxer instantiation for entry:", entry.id, e, "Options were:", muxerOptions);
         entry.muxer = null;
         return false;
     }
