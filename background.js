@@ -123,7 +123,13 @@
         await browserToUse.scripting.executeScript({
             target: { tabId: tab.id },
             files: ["lib/mp4-muxer.js"],
-            world: "MAIN" // Added this line
+            world: "MAIN"
+        });
+        // Inject iso_boxer.min.js next, into the MAIN world
+        await browserToUse.scripting.executeScript({
+            target: { tabId: tab.id },
+            files: ["lib/iso_boxer.min.js"],
+            world: "MAIN"
         });
         // Then inject script.js
                         await browserToUse.scripting.executeScript({
@@ -131,7 +137,7 @@
                             files: ['script.js'],
                             world: "MAIN"
                         });
-                        browserToUse.tabs.sendMessage(ids[0].id, { // Update user preferences
+        browserToUse.tabs.sendMessage(tab.id, { // Update user preferences - corrected to use tab.id
                             action: "updateChoices",
                             content: await browserToUse.storage.sync.get(["finalize_fs_stream_when_video_finishes", "delete_entries_when_video_finishes", "download_content_when_video_finishes"])
                         });

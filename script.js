@@ -412,107 +412,172 @@ function parseMimeType(mimeTypeStr) {
                     const targetStream = currentEntry[parsedMime.type]; // parsedMime.type from outer scope
 
                     if (targetStream) {
-                        // KEY FRAME ASSUMPTION:
-                        // This assumes the very first chunk appended to a track's SourceBuffer is a key frame,
-                        // and all subsequent chunks are delta frames. This is a significant simplification.
-                        // Modern streaming (DASH/HLS with fMP4) delivers media in segments, each starting
-                        // with a key frame. If these segments are appended after frameCount > 0,
-                        // their initial key frames will be misidentified as 'delta'.
-                        // This can lead to muxing errors or unplayable files if the muxer (Mp4Muxer)
-                        // relies on accurate keyframe identification for segmenting or indexing.
-                        // True key frame detection would require complex media parsing.
-                        // Errors during muxer.addVideoChunkRaw() or muxer.finalize() might be related to this if other parameters seem correct.
+                        // --- START OF ISOBoxer fMP4 PARSING LOGIC ---
+                        let usingFmp4Metadata = false;
+                        let actualChunkTimestamp = targetStream.currentTimeInMicros;
+                        let actualChunkDuration = 0;
+                        let determinedChunkType = targetStream.frameCount === 0 ? 'key' : 'delta';
 
-                        let chunkType = 'delta'; // Default to delta
+                        if (typeof ISOBoxer !== 'undefined' && ISOBoxer.parseBuffer && arrayBufferData.byteLength > 0) {
+                            try {
+                                const parsedBuffer = ISOBoxer.parseBuffer(arrayBufferData.slice(0));
+                                const moof = parsedBuffer.fetch('moof');
 
-                        if (targetStream.frameCount === 0) {
-                            chunkType = 'key';
-                            console.log(`MediaCache: [Entry ${currentEntry.id}] ${parsedMime.type} chunk ${targetStream.frameCount} marked as KEY (first chunk).`);
-                        } else if (parsedMime.type === 'video') {
-                            // Heuristic: If current chunk is > 5x previous chunk size, or previous was tiny and current is substantial.
-                            const currentChunkSize = arrayBufferData.byteLength;
-                            const previousChunkSize = targetStream.lastChunkSize || 1;
-                            const minKeyframeSize = 2048;
+                                if (moof) {
+                                    console.log(`MediaCache: [Inst: ${scriptInstanceId}][Entry ${currentEntry.id}] Found 'moof' box. Attempting fMP4 metadata extraction.`);
+                                    const traf = moof.fetch('traf');
 
-                            if (currentChunkSize > minKeyframeSize &&
-                                (currentChunkSize > previousChunkSize * 5 || (previousChunkSize < 1024 && currentChunkSize > 10000))) {
-                                chunkType = 'key';
-                                console.log(`MediaCache: [Entry ${currentEntry.id}] Video chunk ${targetStream.frameCount} marked as KEY by heuristic. CurrentSize: ${currentChunkSize}, PrevSize: ${targetStream.lastChunkSize}`);
+                                    if (traf) {
+                                        const tfdt = traf.fetch('tfdt');
+                                        const trun = traf.fetch('trun');
+                                        const tfhd = traf.fetch('tfhd');
+
+                                        if (tfdt && trun && tfhd) {
+                                            const trackTimescale = targetStream.timescale || 90000;
+
+                                            if (tfdt.baseMediaDecodeTime >= 0) {
+                                                actualChunkTimestamp = (tfdt.baseMediaDecodeTime / trackTimescale) * 1000000;
+                                                console.log(`MediaCache: [Inst: ${scriptInstanceId}][Entry ${currentEntry.id}] fMP4 tfdt.baseMediaDecodeTime: ${tfdt.baseMediaDecodeTime} (ts: ${trackTimescale}), timestamp: ${actualChunkTimestamp}µs`);
+                                            } else {
+                                                console.warn(`MediaCache: [Inst: ${scriptInstanceId}][Entry ${currentEntry.id}] fMP4 tfdt.baseMediaDecodeTime not found or invalid, using accumulated timestamp.`);
+                                            }
+
+                                            let calculatedDurationInTrackTimescale = 0;
+                                            if (trun.samples && trun.sample_count > 0) {
+                                                if (trun.flags & 0x000100) {
+                                                    for (let i = 0; i < trun.sample_count; i++) {
+                                                        if (trun.samples[i] && typeof trun.samples[i].sample_duration === 'number') {
+                                                            calculatedDurationInTrackTimescale += trun.samples[i].sample_duration;
+                                                        } else if (tfhd.flags & 0x000008) {
+                                                            calculatedDurationInTrackTimescale += tfhd.default_sample_duration;
+                                                        } else {
+                                                             console.warn(`MediaCache: [Inst: ${scriptInstanceId}][Entry ${currentEntry.id}] fMP4 trun sample ${i} missing duration, and no default in tfhd.`);
+                                                        }
+                                                    }
+                                                } else if (tfhd.flags & 0x000008) {
+                                                    calculatedDurationInTrackTimescale = tfhd.default_sample_duration * trun.sample_count;
+                                                }
+                                            }
+
+                                            if (calculatedDurationInTrackTimescale > 0) {
+                                                actualChunkDuration = (calculatedDurationInTrackTimescale / trackTimescale) * 1000000;
+                                                console.log(`MediaCache: [Inst: ${scriptInstanceId}][Entry ${currentEntry.id}] fMP4 trun calculated total duration: ${actualChunkDuration}µs for ${trun.sample_count} samples.`);
+                                            } else {
+                                                console.warn(`MediaCache: [Inst: ${scriptInstanceId}][Entry ${currentEntry.id}] fMP4 trun duration could not be calculated, using estimation.`);
+                                            }
+
+                                            let firstSampleIsKeyframe = false;
+                                            if (trun.flags & 0x000004 && trun.first_sample_flags !== undefined) {
+                                                firstSampleIsKeyframe = true;
+                                                console.log(`MediaCache: [Inst: ${scriptInstanceId}][Entry ${currentEntry.id}] fMP4 'moof' found, assuming first sample of this chunk is KEY.`);
+                                            } else if (tfhd.flags & 0x000020 && tfhd.default_sample_flags !== undefined) {
+                                                firstSampleIsKeyframe = true;
+                                                console.log(`MediaCache: [Inst: ${scriptInstanceId}][Entry ${currentEntry.id}] fMP4 'tfhd' default_sample_flags found, assuming KEY.`);
+                                            }
+
+                                            if (targetStream.frameCount === 0 || firstSampleIsKeyframe) {
+                                                determinedChunkType = 'key';
+                                            } else {
+                                                determinedChunkType = 'delta';
+                                            }
+                                            console.log(`MediaCache: [Inst: ${scriptInstanceId}][Entry ${currentEntry.id}] fMP4 determined chunkType: ${determinedChunkType}`);
+
+                                            usingFmp4Metadata = true;
+                                        } else {
+                                            console.warn(`MediaCache: [Inst: ${scriptInstanceId}][Entry ${currentEntry.id}] 'moof' box found, but missing 'tfdt' or 'trun' or 'tfhd'. Cannot use fMP4 metadata.`);
+                                        }
+                                    } else {
+                                         console.warn(`MediaCache: [Inst: ${scriptInstanceId}][Entry ${currentEntry.id}] 'moof' box found, but missing 'traf'. Cannot use fMP4 metadata.`);
+                                    }
+                                } else {
+                                    const ftyp = parsedBuffer.fetch('ftyp');
+                                    const moov = parsedBuffer.fetch('moov');
+                                    if (ftyp && moov) {
+                                        console.log(`MediaCache: [Inst: ${scriptInstanceId}][Entry ${currentEntry.id}] Received init segment (ftyp/moov). Skipping add to muxer data queue.`);
+                                        return originalAppendBuffer.call(this, arrayBufferData);
+                                    }
+                                    console.log(`MediaCache: [Inst: ${scriptInstanceId}][Entry ${currentEntry.id}] No 'moof' box found. Not an fMP4 media segment. Using estimations.`);
+                                }
+                            } catch (e) {
+                                console.warn(`MediaCache: [Inst: ${scriptInstanceId}][Entry ${currentEntry.id}] Error parsing ArrayBuffer with ISOBoxer:`, e, "Using estimations.");
+                                usingFmp4Metadata = false;
                             }
                         }
-                        // Audio chunks after the first are 'delta'. (Implicitly handled by 'delta' default if not frameCount 0)
+                        // --- END OF ISOBoxer fMP4 PARSING LOGIC ---
 
-                        const timestamp = targetStream.currentTimeInMicros;
+                        // Timestamp, Duration, Type determination
+                        let timestampToUse;
+                        let durationToUse;
+                        let chunkTypeToUse;
 
-                        // --- CRITICAL NOTE ON CHUNK DURATION AND TIMESTAMPS ---
-                        // The 'estimatedDuration' calculated below is a MAJOR SIMPLIFICATION and very likely INCORRECT
-                        // for most real-world streaming scenarios (like HLS or DASH with fMP4 segments).
-                        //
-                        // PROBLEM: The `arrayBufferData` received by `appendBuffer` is a chunk of bytes from the
-                        // media stream. This chunk can contain MANY individual video frames or audio samples, and
-                        // its actual media duration can vary significantly. It is NOT typically a single frame.
-                        //
-                        // `mp4-muxer`'s `addVideoChunkRaw` and `addAudioChunkRaw` expect the `timestamp` and `duration`
-                        // parameters to accurately reflect the timing of the *specific media content within that
-                        // `arrayBufferData` chunk*.
-                        //
-                        // CURRENT LIMITATION: We are assigning a fixed estimated duration (e.g., 33ms for video,
-                        // 20ms for audio) to the *entire chunk*, regardless of its true internal media duration.
-                        // The `timestamp` is then just an accumulation of these fixed estimates.
-                        //
-                        // CONSEQUENCE: This almost certainly leads to incorrect timing information in the muxed MP4 file,
-                        // making it unplayable or appear corrupt, even if `mp4-muxer` completes without error.
-                        //
-                        // TRUE FIX: A robust solution would require parsing the `arrayBufferData` to determine its
-                        // actual media duration. For fMP4 streams, this would involve parsing MP4 boxes like 'moof',
-                        // 'tfdt', 'trun' to get sample counts, durations, and overall segment duration. This is a
-                        // complex task beyond the current scope.
-                        //
-                        // The keyframe heuristic (while important) cannot compensate for fundamentally incorrect
-                        // chunk durations and timestamps. If muxed files are corrupt, this duration/timestamp
-                        // inaccuracy is the most probable cause.
-                        // --- END CRITICAL NOTE ---
+                        if (usingFmp4Metadata && actualChunkDuration > 0) {
+                            timestampToUse = actualChunkTimestamp;
+                            durationToUse = actualChunkDuration;
+                            chunkTypeToUse = determinedChunkType;
+                            targetStream.currentTimeInMicros = timestampToUse + durationToUse;
+                        } else {
+                            timestampToUse = targetStream.currentTimeInMicros;
 
-                        let estimatedDuration = 0;
-                        if (parsedMime.type === 'video') {
-                            if (targetStream.fps && targetStream.fps > 0) { // Use parsed FPS if available
-                                estimatedDuration = Math.round(1000000 / targetStream.fps);
-                                console.log(`MediaCache: [Entry ${currentEntry.id}] Video duration from FPS (${targetStream.fps}): ${estimatedDuration}µs`);
-                            } else { // Fallback to existing logic (default 30fps)
-                                estimatedDuration = Math.round(1000000 / (targetStream.timescale === 90000 ? 30 : (targetStream.timescale || 30)));
+                            if (targetStream.frameCount === 0) {
+                                determinedChunkType = 'key';
+                                 console.log(`MediaCache: [Inst: ${scriptInstanceId}][Entry ${currentEntry.id}] ${parsedMime.type} chunk ${targetStream.frameCount} marked as KEY (first chunk, fallback).`);
+                            } else if (parsedMime.type === 'video') {
+                                const currentChunkSize = arrayBufferData.byteLength;
+                                const previousChunkSize = targetStream.lastChunkSize || 1;
+                                const minKeyframeSize = 2048;
+                                if (currentChunkSize > minKeyframeSize &&
+                                    (currentChunkSize > previousChunkSize * 5 || (previousChunkSize < 1024 && currentChunkSize > 10000))) {
+                                    determinedChunkType = 'key';
+                                    console.log(`MediaCache: [Inst: ${scriptInstanceId}][Entry ${currentEntry.id}] Video chunk ${targetStream.frameCount} marked as KEY by heuristic (fallback). CurrentSize: ${currentChunkSize}, PrevSize: ${targetStream.lastChunkSize}`);
+                                } else {
+                                    determinedChunkType = 'delta';
+                                }
+                            } else if (parsedMime.type === 'audio') {
+                                 determinedChunkType = 'delta';
                             }
-                        } else if (parsedMime.type === 'audio') {
-                            if (targetStream.codec === 'aac' && targetStream.sampleRate) {
-                                estimatedDuration = Math.round((1024 / targetStream.sampleRate) * 1000000);
-                            } else if (targetStream.codec === 'opus') {
-                                estimatedDuration = 20000;
-                            } else if (targetStream.sampleRate) {
-                                estimatedDuration = Math.round((1024 / targetStream.sampleRate) * 1000000);
-                            } else {
-                                estimatedDuration = 20000;
+                            chunkTypeToUse = determinedChunkType;
+
+                            let estimatedDuration = 0;
+                            if (parsedMime.type === 'video') {
+                                if (targetStream.fps && targetStream.fps > 0) {
+                                    estimatedDuration = Math.round(1000000 / targetStream.fps);
+                                } else {
+                                    estimatedDuration = Math.round(1000000 / (targetStream.timescale === 90000 ? 30 : (targetStream.timescale || 30)));
+                                }
+                            } else if (parsedMime.type === 'audio') {
+                                if (targetStream.codec === 'aac' && targetStream.sampleRate) {
+                                    estimatedDuration = Math.round((1024 / targetStream.sampleRate) * 1000000);
+                                } else if (targetStream.codec === 'opus') {
+                                    estimatedDuration = 20000;
+                                } else if (targetStream.sampleRate) {
+                                    estimatedDuration = Math.round((1024 / targetStream.sampleRate) * 1000000);
+                                } else {
+                                    estimatedDuration = 20000;
+                                }
                             }
+                            if (estimatedDuration === 0) estimatedDuration = 33333;
+                            durationToUse = estimatedDuration;
+                            targetStream.currentTimeInMicros += durationToUse;
                         }
-                        if (estimatedDuration === 0) estimatedDuration = 33333;
-
-                        targetStream.currentTimeInMicros += estimatedDuration;
-                        targetStream.frameCount++;
-
-                        const chunkInfo = {
-                            buffer: arrayBufferData.slice(0),
-                            timestamp: timestamp,
-                            duration: estimatedDuration,
-                            type: chunkType
-                        };
-                        console.log(`MediaCache: [Entry ${currentEntry.id}] appendBuffer for ${parsedMime.type}:`,
-                                    `Type: ${chunkInfo.type}`,
-                                    `Timestamp: ${chunkInfo.timestamp}µs`,
-                                    `Duration: ${chunkInfo.duration}µs`,
-                                    `Size: ${chunkInfo.buffer.byteLength}`,
-                                    `Frame/ChunkCount: ${targetStream.frameCount}`);
 
                         if (parsedMime.type === 'video') {
                             targetStream.lastChunkSize = arrayBufferData.byteLength;
                         }
+                        targetStream.frameCount++;
+
+                        const chunkInfo = {
+                            buffer: arrayBufferData.slice(0),
+                            timestamp: timestampToUse,
+                            duration: durationToUse,
+                            type: chunkTypeToUse
+                        };
+
+                        console.log(`MediaCache: [Inst: ${scriptInstanceId}][Entry ${currentEntry.id}] appendBuffer for ${parsedMime.type}:`,
+                                    `Type: ${chunkInfo.type}`,
+                                    `Timestamp: ${chunkInfo.timestamp}µs`,
+                                    `Duration: ${chunkInfo.duration}µs (fMP4: ${usingFmp4Metadata})`,
+                                    `Size: ${chunkInfo.buffer.byteLength}`,
+                                    `Frame/ChunkCount: ${targetStream.frameCount}`);
 
                         if (targetStream.writable) {
                             targetStream.data.push(chunkInfo);

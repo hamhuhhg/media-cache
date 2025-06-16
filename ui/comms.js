@@ -29,16 +29,22 @@
         // Inject mp4-muxer.js first, into the MAIN world
         await browserToUse.scripting.executeScript({
             target: { tabId: ids[0].id },
-            files: ["lib/mp4-muxer.js"], // Corrected path and added world
-            world: "MAIN" // Added this line
+            files: ["lib/mp4-muxer.js"],
+            world: "MAIN"
+        });
+        // Inject iso_boxer.min.js next, into the MAIN world
+        await browserToUse.scripting.executeScript({
+            target: { tabId: ids[0].id },
+            files: ["lib/iso_boxer.min.js"],
+            world: "MAIN"
         });
         // Then inject script.js
                     await browserToUse.scripting.executeScript({
                         target: { tabId: ids[0].id },
-                        files: ['/script.js'],
+            files: ['script.js'], // Corrected path for script.js (removed leading slash)
                         world: "MAIN"
                     });
-                    browserToUse.tabs.sendMessage(ids[0].id, { // Change what the script should do when the video ends according to the previously-selected things
+        browserToUse.tabs.sendMessage(ids[0].id, {
                         action: "updateChoices",
                         content: await browserToUse.storage.sync.get(["finalize_fs_stream_when_video_finishes", "delete_entries_when_video_finishes", "download_content_when_video_finishes"])
                     });
