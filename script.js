@@ -1,4 +1,6 @@
 (async () => {
+    const scriptInstanceId = crypto.randomUUID(); // Define at the very top of the IIFE
+    console.log(`MediaCache: script.js instance started. ID: ${scriptInstanceId}`);
 
     /**
      * Includes some flags that can be enabled/disabled either from the code or from the extension UI. These might not always work.
@@ -126,9 +128,20 @@
             return await intelligentFileHandle(name);
         }
         isFileHandleInCreation = true;
+    try {
+        if (!picker || typeof picker.getFileHandle !== 'function') {
+            console.warn("MediaCache: intelligentFileHandle - picker is undefined or not a valid directory handle. Cannot get file handle for:", name);
+            isFileHandleInCreation = false;
+            return null;
+        }
         const file = await picker.getFileHandle(name, { create: true });
         isFileHandleInCreation = false;
         return file;
+    } catch (e) {
+        console.error("MediaCache: intelligentFileHandle - Error getting file handle for:", name, e);
+        isFileHandleInCreation = false;
+        return null; // Return null on error
+    }
     }
 
 function parseMimeType(mimeTypeStr) {
@@ -558,6 +571,10 @@ async function initMuxer(entry) {
         return false;
     }
 
+    // Log the state of entry.video.decoderConfig BEFORE explicitly constructing videoOptions
+    console.log("MediaCache: initMuxer - entry.video.decoderConfig BEFORE override:", JSON.parse(JSON.stringify(entry.video.decoderConfig)));
+
+    // Construct videoOptions with an ALWAYS NEW decoderConfig containing the default colorSpace
     const videoOptions = {
         codec: entry.video.codec === 'h264' ? 'avc' : entry.video.codec,
         width: entry.video.width,
@@ -587,8 +604,9 @@ async function initMuxer(entry) {
         firstTimestampBehavior: 'offset'
     };
 
-    console.log("MediaCache: initMuxer - Final video options for Mp4Muxer:", JSON.parse(JSON.stringify(videoOptions)));
-    console.log("MediaCache: initMuxer - Final audio options for Mp4Muxer:", JSON.parse(JSON.stringify(audioOptions)));
+    // Log the final videoOptions passed to Mp4Muxer
+    console.log("MediaCache: initMuxer - Final video options FOR Mp4Muxer (explicitly constructed decoderConfig):", JSON.parse(JSON.stringify(videoOptions)));
+    console.log("MediaCache: initMuxer - Final audio options FOR Mp4Muxer:", JSON.parse(JSON.stringify(audioOptions)));
     console.log("MediaCache: Mp4Muxer options for entry:", entry.id, JSON.parse(JSON.stringify(muxerOptions)));
 
 
@@ -945,13 +963,13 @@ async function finalizeMuxingAndDownload(entry) {
                 break;
             case "downloadThis": // Download the item in the data.content (which is entry.id)
                 const requestedId = msg.data.content;
-                console.log(`MediaCache: Received 'downloadThis' for ID: ${requestedId}. Current arr IDs: ${arr.map(e=>e.id.substring(0,8)).join(', ')}`);
+                console.log(`MediaCache: [Inst: ${scriptInstanceId}] Received 'downloadThis' for ID: ${requestedId}. Current arr IDs: ${arr.map(e=>e.id.substring(0,8)).join(', ')}`);
                 const itemToDownload = arr.find(item => item.id === requestedId);
                 if (itemToDownload) {
-                    console.log(`MediaCache: [Entry ${requestedId}] found for downloadThis. ProcessingAttempted: ${itemToDownload.processingAttempted}`);
+                    console.log(`MediaCache: [Inst: ${scriptInstanceId}] [Entry ${requestedId}] found for downloadThis. ProcessingAttempted: ${itemToDownload.processingAttempted}`);
                     finalizeMuxingAndDownload(itemToDownload);
                 } else {
-                    console.warn(`MediaCache: downloadThis - item with ID ${requestedId} NOT FOUND in arr.`);
+                    console.warn(`MediaCache: [Inst: ${scriptInstanceId}] downloadThis - item with ID ${requestedId} NOT FOUND in arr.`);
                 }
                 break;
             case "fileSystem":
