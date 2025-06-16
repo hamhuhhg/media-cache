@@ -293,8 +293,8 @@ function parseMimeType(mimeTypeStr) {
                         fps: parsedMime.fps || null, // <-- STORE PARSED FPS
                         currentWrite: 0, writable: null, file: null,
                         currentTimeInMicros: 0,
-                        frameCount: 0,
-                        lastChunkSize: 0 // <-- NEW PROPERTY for keyframe heuristic
+                        frameCount: 0
+                        // lastChunkSize: 0 // <-- REMOVED
                     },
                     audio: null, // Initialize audio as null
                     muxer: null,
@@ -422,24 +422,20 @@ function parseMimeType(mimeTypeStr) {
                         // True key frame detection would require complex media parsing.
                         // Errors during muxer.addVideoChunkRaw() or muxer.finalize() might be related to this if other parameters seem correct.
 
-                        let chunkType = 'delta'; // Default to delta
+                        let chunkType = 'delta'; // Default for safety, though will be overridden for video/audio first.
 
-                        if (targetStream.frameCount === 0) {
-                            chunkType = 'key';
-                            console.log(`MediaCache: [Entry ${currentEntry.id}] Video chunk ${targetStream.frameCount} marked as KEY (first chunk).`);
-                        } else if (parsedMime.type === 'video') {
-                            const currentChunkSize = arrayBufferData.byteLength;
-                            const previousChunkSize = targetStream.lastChunkSize || 1;
-                            const minKeyframeSize = 2048;
-
-                            if (currentChunkSize > minKeyframeSize &&
-                                (currentChunkSize > previousChunkSize * 5 || (previousChunkSize < 1024 && currentChunkSize > 10000))) {
-                                chunkType = 'key';
-                                console.log(`MediaCache: [Entry ${currentEntry.id}] Video chunk ${targetStream.frameCount} marked as KEY by heuristic. CurrentSize: ${currentChunkSize}, PrevSize: ${targetStream.lastChunkSize}`);
+                        if (parsedMime.type === 'video') {
+                            chunkType = 'key'; // EXPERIMENT: Mark ALL video chunks as keyframes
+                            if (targetStream.frameCount === 0) {
+                                console.log(`MediaCache: [Entry ${currentEntry.id}] Video chunk ${targetStream.frameCount} marked as KEY (first chunk).`);
+                            } else {
+                                console.log(`MediaCache: [Entry ${currentEntry.id}] Video chunk ${targetStream.frameCount} EXPERIMENTALLY marked as KEY.`);
                             }
-                        }
-                        if (parsedMime.type === 'audio' && targetStream.frameCount === 0) {
-                            chunkType = 'key';
+                        } else if (parsedMime.type === 'audio') {
+                            chunkType = targetStream.frameCount === 0 ? 'key' : 'delta';
+                            if (chunkType === 'key') {
+                                 console.log(`MediaCache: [Entry ${currentEntry.id}] Audio chunk ${targetStream.frameCount} marked as KEY (first chunk).`);
+                            }
                         }
 
                         const timestamp = targetStream.currentTimeInMicros;
@@ -481,9 +477,7 @@ function parseMimeType(mimeTypeStr) {
                                     `Size: ${chunkInfo.buffer.byteLength}`,
                                     `Frame/ChunkCount: ${targetStream.frameCount}`);
 
-                        if (parsedMime.type === 'video') {
-                            targetStream.lastChunkSize = arrayBufferData.byteLength;
-                        }
+                        // REMOVED: if (parsedMime.type === 'video') { targetStream.lastChunkSize = arrayBufferData.byteLength; }
 
                         if (targetStream.writable) {
                             targetStream.data.push(chunkInfo);
@@ -744,6 +738,7 @@ async function finalizeMuxingAndDownload(entry) {
                                .replace(/\.[^./]+$/, '');
 
             const titleToUse = `${baseTitle} [MUXED].mp4`; // Always use .mp4 for muxed files
+            console.log(`MediaCache: [Entry ${entry.id}] Muxed filename generated: ${titleToUse}`);
 
             if (picker && entry.finalTitle) {
                 try {

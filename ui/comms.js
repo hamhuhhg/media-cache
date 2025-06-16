@@ -48,17 +48,72 @@
         });
     }
     checkFunctionaly();
-    document.getElementById("addHostname").addEventListener("click", () => { // Add a new hostname (with the wildcard pattern) in the list of the alllowed URLs
-        const origin = document.getElementById("newHostname").value;
+    document.getElementById("addHostname").addEventListener("click", () => {
+        let origin = document.getElementById("newHostname").value.trim();
+
+        if (!origin) {
+            alert("Please enter a hostname or pattern.");
+            return;
+        }
+
+        let isLikelyFullURL = false;
+        try {
+            // Test if it's a full URL like https://example.com/path by trying to construct a URL object.
+            // If origin starts with a wildcard scheme, replace it with https for validation purposes.
+            new URL(origin.replace(/^(\*|https?):\/\//, 'https://'));
+            isLikelyFullURL = true;
+        } catch (e) {
+            // Not a full URL structure, proceed with pattern logic
+        }
+
+        if (!isLikelyFullURL) {
+            // Case 1: *://*.example.com (missing /* at the end)
+            if (origin.startsWith("*://*.") && !origin.endsWith("/*") && !origin.substring("*://*.".length).includes("/")) {
+                origin += "/*";
+                console.log("MediaCache UI: Sanitized pattern to (case 1):", origin);
+            }
+            // Case 2: *.example.com (missing scheme and /*)
+            else if (origin.startsWith("*.") && !origin.includes("://") && !origin.includes("/")) {
+                origin = `*://${origin}/*`;
+                console.log("MediaCache UI: Sanitized pattern to (case 2):", origin);
+            }
+            // Case 3: example.com (simple hostname)
+            else if (!origin.includes("://") && origin.includes(".") && !origin.includes("/") && !origin.includes("*")) {
+                origin = `*://*.${origin}/*`;
+                console.log("MediaCache UI: Converted simple hostname to pattern (case 3):", origin);
+            }
+            // Case 4: example.com/path (hostname and path, no scheme, no wildcard in host)
+            else if (!origin.includes("://") && origin.includes(".") && origin.includes("/") && !origin.startsWith("*")) {
+                 // Check if the part before the first '/' looks like a hostname without wildcards
+                const hostPart = origin.substring(0, origin.indexOf('/'));
+                if (!hostPart.includes('*')) {
+                    origin = `*://${origin}`; // Prepend *:// if it's like "example.com/path"
+                                          // User might need to add /* at the end if they mean all sub-paths
+                    console.log("MediaCache UI: Sanitized pattern to (case 4):", origin);
+                }
+            }
+            // Case 5: *://example.com (specific host with wildcard scheme, missing /*)
+             else if (origin.startsWith("*://") && !origin.startsWith("*://*.") && !origin.endsWith("/*") && !origin.substring("*://".length).includes('/')) {
+                origin += "/*";
+                console.log("MediaCache UI: Sanitized pattern to (case 5):", origin);
+            }
+        }
+
+
         browserToUse.storage.sync.get({ urls: [] }, (data) => {
             const urls = data.urls;
+            if (urls.includes(origin)) {
+                alert("This pattern already exists.");
+                return;
+            }
             urls.push(origin);
             browserToUse.storage.sync.set({ urls: urls }, () => {
-                alert("Entry added! You might need to refresh the page to make the extension work.");
+                alert("Pattern added! You might need to refresh relevant pages for changes to take full effect.");
                 addItemToAllowedList(origin);
+                document.getElementById("newHostname").value = ""; // Clear input
             });
         });
-    })
+    });
     /**
      * Show the URL added by the user in a list
      * @param {string} url the URL syntax (with wildcars if added by the user)

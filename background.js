@@ -48,9 +48,61 @@
     browserToUse.tabs.onUpdated.addListener((_, __, tab) => {
         eventTabChange(tab);
     });
-    if (result.urls) { // When the extension is being activated, check the URLs that have been previously stored and run the scripts there
-        const queryUrl = await new Promise((resolve) => browserToUse.tabs.query({ url: result.urls }, resolve));
-        for (const tab of queryUrl) await tabInject(tab)
+    if (result.urls && Array.isArray(result.urls) && result.urls.length > 0) {
+        let validPatterns = result.urls.map(p => {
+            if (typeof p === 'string') {
+                // Handle *://*.example.com -> *://*.example.com/*
+                if (p.startsWith('*://*.') && !p.endsWith('/*') && p.split('/').length === 3 && !p.substring("*://*.".length).includes('/')) {
+                    console.warn(`Background: Sanitizing stored pattern "${p}" to "${p}/*"`);
+                    return p + "/*";
+                }
+                // Handle *://example.com -> *://example.com/* (no wildcard in host part)
+                if (p.startsWith('*://') && !p.startsWith('*://*.') && !p.endsWith('/*') && p.split('/').length === 3 && !p.substring("*://".length).includes('/')) {
+                    console.warn(`Background: Sanitizing stored pattern "${p}" to "${p}/*"`);
+                    return p + "/*";
+                }
+            }
+            return p;
+        }).filter(p => {
+            if (typeof p !== 'string' || p.length === 0) {
+                console.warn(`Background: Filtering out invalid pattern (non-string or empty): "${p}"`);
+                return false;
+            }
+            if (!p.includes('://')) {
+                 console.warn(`Background: Filtering out invalid pattern (missing '://'): "${p}"`);
+                 return false;
+            }
+            if (!/^(https?|\*):\/\//.test(p)) { // Ensure scheme is http, https, or *
+                console.warn(`Background: Filtering out invalid pattern (bad scheme): "${p}"`);
+                return false;
+            }
+            return true;
+        });
+
+        if (validPatterns.length > 0) {
+            console.log("Background: Querying tabs with patterns on startup:", validPatterns);
+            try {
+                // The original code wrapped browserToUse.tabs.query in a new Promise.
+                // It's generally not needed as tabs.query itself returns a Promise.
+                const tabsFound = await browserToUse.tabs.query({ url: validPatterns });
+                if (tabsFound && Array.isArray(tabsFound)) {
+                    for (const tab of tabsFound) {
+                        if (tab && tab.id) {
+                           await tabInject(tab);
+                        }
+                    }
+                } else {
+                    console.warn("Background: tabs.query on startup did not return an iterable array for patterns:", validPatterns);
+                }
+            } catch (e) {
+                console.error("Background: Error during initial tabs.query or subsequent tabInject:", e, "Patterns were:", validPatterns);
+                if (browserToUse.runtime.lastError) {
+                    console.error("Background: runtime.lastError after initial tabs.query:", browserToUse.runtime.lastError.message);
+                }
+            }
+        } else {
+            console.log("Background: No valid URL patterns found in storage to query tabs on startup after filtering.");
+        }
     }
     /**
      * Inject the content scripts in the tab
