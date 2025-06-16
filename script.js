@@ -293,8 +293,8 @@ function parseMimeType(mimeTypeStr) {
                         fps: parsedMime.fps || null, // <-- STORE PARSED FPS
                         currentWrite: 0, writable: null, file: null,
                         currentTimeInMicros: 0,
-                        frameCount: 0
-                        // lastChunkSize: 0 // <-- REMOVED
+                        frameCount: 0,
+                        lastChunkSize: 0 // <-- RE-ADD THIS PROPERTY
                     },
                     audio: null, // Initialize audio as null
                     muxer: null,
@@ -422,23 +422,55 @@ function parseMimeType(mimeTypeStr) {
                         // True key frame detection would require complex media parsing.
                         // Errors during muxer.addVideoChunkRaw() or muxer.finalize() might be related to this if other parameters seem correct.
 
-                        let chunkType = 'delta'; // Default for safety, though will be overridden for video/audio first.
+                        let chunkType = 'delta'; // Default to delta
 
-                        if (parsedMime.type === 'video') {
-                            chunkType = 'key'; // EXPERIMENT: Mark ALL video chunks as keyframes
-                            if (targetStream.frameCount === 0) {
-                                console.log(`MediaCache: [Entry ${currentEntry.id}] Video chunk ${targetStream.frameCount} marked as KEY (first chunk).`);
-                            } else {
-                                console.log(`MediaCache: [Entry ${currentEntry.id}] Video chunk ${targetStream.frameCount} EXPERIMENTALLY marked as KEY.`);
-                            }
-                        } else if (parsedMime.type === 'audio') {
-                            chunkType = targetStream.frameCount === 0 ? 'key' : 'delta';
-                            if (chunkType === 'key') {
-                                 console.log(`MediaCache: [Entry ${currentEntry.id}] Audio chunk ${targetStream.frameCount} marked as KEY (first chunk).`);
+                        if (targetStream.frameCount === 0) {
+                            chunkType = 'key';
+                            console.log(`MediaCache: [Entry ${currentEntry.id}] ${parsedMime.type} chunk ${targetStream.frameCount} marked as KEY (first chunk).`);
+                        } else if (parsedMime.type === 'video') {
+                            // Heuristic: If current chunk is > 5x previous chunk size, or previous was tiny and current is substantial.
+                            const currentChunkSize = arrayBufferData.byteLength;
+                            const previousChunkSize = targetStream.lastChunkSize || 1;
+                            const minKeyframeSize = 2048;
+
+                            if (currentChunkSize > minKeyframeSize &&
+                                (currentChunkSize > previousChunkSize * 5 || (previousChunkSize < 1024 && currentChunkSize > 10000))) {
+                                chunkType = 'key';
+                                console.log(`MediaCache: [Entry ${currentEntry.id}] Video chunk ${targetStream.frameCount} marked as KEY by heuristic. CurrentSize: ${currentChunkSize}, PrevSize: ${targetStream.lastChunkSize}`);
                             }
                         }
+                        // Audio chunks after the first are 'delta'. (Implicitly handled by 'delta' default if not frameCount 0)
 
                         const timestamp = targetStream.currentTimeInMicros;
+
+                        // --- CRITICAL NOTE ON CHUNK DURATION AND TIMESTAMPS ---
+                        // The 'estimatedDuration' calculated below is a MAJOR SIMPLIFICATION and very likely INCORRECT
+                        // for most real-world streaming scenarios (like HLS or DASH with fMP4 segments).
+                        //
+                        // PROBLEM: The `arrayBufferData` received by `appendBuffer` is a chunk of bytes from the
+                        // media stream. This chunk can contain MANY individual video frames or audio samples, and
+                        // its actual media duration can vary significantly. It is NOT typically a single frame.
+                        //
+                        // `mp4-muxer`'s `addVideoChunkRaw` and `addAudioChunkRaw` expect the `timestamp` and `duration`
+                        // parameters to accurately reflect the timing of the *specific media content within that
+                        // `arrayBufferData` chunk*.
+                        //
+                        // CURRENT LIMITATION: We are assigning a fixed estimated duration (e.g., 33ms for video,
+                        // 20ms for audio) to the *entire chunk*, regardless of its true internal media duration.
+                        // The `timestamp` is then just an accumulation of these fixed estimates.
+                        //
+                        // CONSEQUENCE: This almost certainly leads to incorrect timing information in the muxed MP4 file,
+                        // making it unplayable or appear corrupt, even if `mp4-muxer` completes without error.
+                        //
+                        // TRUE FIX: A robust solution would require parsing the `arrayBufferData` to determine its
+                        // actual media duration. For fMP4 streams, this would involve parsing MP4 boxes like 'moof',
+                        // 'tfdt', 'trun' to get sample counts, durations, and overall segment duration. This is a
+                        // complex task beyond the current scope.
+                        //
+                        // The keyframe heuristic (while important) cannot compensate for fundamentally incorrect
+                        // chunk durations and timestamps. If muxed files are corrupt, this duration/timestamp
+                        // inaccuracy is the most probable cause.
+                        // --- END CRITICAL NOTE ---
 
                         let estimatedDuration = 0;
                         if (parsedMime.type === 'video') {
@@ -477,7 +509,9 @@ function parseMimeType(mimeTypeStr) {
                                     `Size: ${chunkInfo.buffer.byteLength}`,
                                     `Frame/ChunkCount: ${targetStream.frameCount}`);
 
-                        // REMOVED: if (parsedMime.type === 'video') { targetStream.lastChunkSize = arrayBufferData.byteLength; }
+                        if (parsedMime.type === 'video') {
+                            targetStream.lastChunkSize = arrayBufferData.byteLength;
+                        }
 
                         if (targetStream.writable) {
                             targetStream.data.push(chunkInfo);
