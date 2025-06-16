@@ -8,8 +8,9 @@
     const CUSTOM_BEHAVIOR = {
         finalize_fs_stream_when_video_finishes: true,
         delete_entries_when_video_finishes: false,
-        download_content_when_video_finishes: true
-    }
+        download_content_when_video_finishes: true,
+        enable_experimental_muxing: false // <-- ADD THIS LINE, default to false
+    };
 
     /**
      * Get the suggested title for the file.
@@ -695,42 +696,36 @@ async function finalizeMuxingAndDownload(entry) {
     }
     entry.processingAttempted = true;
 
-    console.log("MediaCache: finalizeMuxingAndDownload called for entry:", entry ? entry.id : "null entry",
-                "Is Candidate:", entry?.isMuxedCandidate,
-                "Video Chunks:", entry?.video?.data?.length,
-                "Audio Chunks:", entry?.audio?.data?.length);
+    console.log(`MediaCache: [Inst: ${scriptInstanceId}] finalizeMuxingAndDownload called for entry: ${entry.id}`,
+                `Is Candidate: ${entry.isMuxedCandidate}`,
+                `Experimental Muxing Enabled: ${CUSTOM_BEHAVIOR.enable_experimental_muxing}`,
+                `Video Chunks: ${entry.video?.data?.length}`,
+                `Audio Chunks: ${entry.audio?.data?.length}`);
 
-    // Store original data references in case of muxing failure to allow fallback
     const originalVideoData = entry.video ? [...entry.video.data] : [];
     const originalAudioData = entry.audio ? [...entry.audio.data] : [];
-    let muxingAttempted = false;
 
-    if (entry.isMuxedCandidate && entry.video && entry.audio &&
-        entry.video.data.length > 0 && entry.audio.data.length > 0) {
+    let muxingWasSuccessful = false;
+    let attemptMuxing = CUSTOM_BEHAVIOR.enable_experimental_muxing &&
+                        entry.isMuxedCandidate &&
+                        entry.video && entry.video.data.length > 0 &&
+                        entry.audio && entry.audio.data.length > 0;
 
-        muxingAttempted = true; // Mark that we are attempting to mux
+    if (attemptMuxing) {
+        console.log(`MediaCache: [Inst: ${scriptInstanceId}] Attempting EXPERIMENTAL muxing for entry: ${entry.id}`);
         if (!entry.muxer) {
-            console.log("MediaCache: Muxer not yet initialized for", entry.id, "initializing now.");
             const muxerInitialized = await initMuxer(entry);
-            console.log("MediaCache: initMuxer outcome for", entry.id, ":", muxerInitialized);
             if (!muxerInitialized || !entry.muxer) {
-                console.warn("MediaCache: Muxer initialization failed for", entry.id, "Falling back to individual downloads.");
-                if (entry.video) entry.video.data = originalVideoData;
-                if (entry.audio) entry.audio.data = originalAudioData;
-                if (entry.video?.data?.length > 0) singleDownload(entry.id, 'video');
-                if (entry.audio?.data?.length > 0) singleDownload(entry.id, 'audio');
-                return;
+                console.warn(`MediaCache: [Inst: ${scriptInstanceId}] Muxer initialization failed for ${entry.id}. Will fall back to individual downloads.`);
+                attemptMuxing = false; // Prevent entering the muxing try block
             }
         }
 
-        console.log("MediaCache: Attempting muxing for entry:", entry.id);
-
-        console.log("MediaCache: Starting muxing for entry:", entry.id); // This log seems redundant with the one above. Keeping one.
-
-        try {
-            const videoMeta = {
-                decoderConfig: {
-                    colorSpace: {
+        if (attemptMuxing && entry.muxer) { // Check attemptMuxing again in case initMuxer failed
+            try {
+                const videoMeta = {
+                    decoderConfig: {
+                        colorSpace: {
                         primaries: 'bt709',
                         transfer: 'bt709',
                         matrix: 'bt709',
@@ -792,57 +787,48 @@ async function finalizeMuxingAndDownload(entry) {
                 a.click();
                 URL.revokeObjectURL(a.href);
             }
-            console.log("MediaCache: Muxing and download/save completed for entry:", entry.id);
+                console.log(`MediaCache: [Inst: ${scriptInstanceId}] Muxing and download/save completed for entry: ${entry.id}`);
+                muxingWasSuccessful = true;
 
-        } catch (error) {
-            console.error("MediaCache: Error during muxing or download for entry:", entry.id, error);
-            // Restore original data for fallback if muxing failed
-            if (entry.video) entry.video.data = originalVideoData;
-            if (entry.audio) entry.audio.data = originalAudioData;
-
-            console.warn("MediaCache: Muxing failed. Attempting fallback to individual downloads if data is available.");
-            if (entry.video?.data?.length > 0) singleDownload(entry.id, 'video');
-            if (entry.audio?.data?.length > 0) singleDownload(entry.id, 'audio');
-        } finally {
-            if (entry.muxer) entry.muxer = null;
-
-            if (CUSTOM_BEHAVIOR.delete_entries_when_video_finishes) {
-                 const videoDataEmpty = !(entry.video && entry.video.data.length > 0);
-                 const audioDataEmpty = !(entry.audio && entry.audio.data.length > 0);
-
-                 if (videoDataEmpty && audioDataEmpty) {
-                    const itemIndex = arr.findIndex(item => item.id === entry.id);
-                    if (itemIndex !== -1) {
-                        console.log(`MediaCache: [Entry ${entry.id}] attemptimg to remove from arr due to successful processing and delete_entries flag. Arr size before: ${arr.length}`);
-                        arr.splice(itemIndex, 1);
-                        console.log(`MediaCache: [Entry ${entry.id}] removed. Arr size after: ${arr.length}. IDs: ${arr.map(e=>e.id.substring(0,8)).join(', ')}`);
-                    }
-                 } else {
-                    console.log("MediaCache: Entry not deleted as data remains (muxing/download might have issues or user intervention needed).", entry.id);
-                 }
+            } catch (error) {
+                console.error(`MediaCache: [Inst: ${scriptInstanceId}] Error during EXPERIMENTAL muxing for entry: ${entry.id}`, error);
+                // Restore original data for fallback
+                if (entry.video) entry.video.data = originalVideoData;
+                if (entry.audio) entry.audio.data = originalAudioData;
+                muxingWasSuccessful = false;
+            } finally {
+                if (entry.muxer) entry.muxer = null;
             }
+        } else if (!entry.muxer && attemptMuxing) { // initMuxer failed but we intended to mux
+             if (entry.video) entry.video.data = originalVideoData;
+             if (entry.audio) entry.audio.data = originalAudioData;
+             muxingWasSuccessful = false; // Ensure fallback path is taken
         }
+    } // End of if (attemptMuxing)
 
-    } else {
-        console.log("MediaCache: Not a muxing candidate or missing data, trying individual downloads for:", entry.id);
-        if (entry.video && entry.video.data.length > 0) {
-            singleDownload(entry.id, 'video');
-        }
-        if (entry.audio && entry.audio.data.length > 0) {
-            singleDownload(entry.id, 'audio');
-        }
+    if (!muxingWasSuccessful) {
+        console.log(`MediaCache: [Inst: ${scriptInstanceId}] Proceeding with separate downloads for entry: ${entry.id} (Muxing disabled, not applicable, or failed).`);
+        // Ensure data is restored if it was potentially modified by a failed mux attempt or if muxing was skipped
+        if(entry.video && (!entry.video.data || entry.video.data.length === 0)) entry.video.data = originalVideoData;
+        if(entry.audio && (!entry.audio.data || entry.audio.data.length === 0)) entry.audio.data = originalAudioData;
 
-        if (CUSTOM_BEHAVIOR.delete_entries_when_video_finishes) {
-            const videoDataEmpty = !(entry.video && entry.video.data.length > 0);
-            const audioDataEmpty = !(entry.audio && entry.audio.data.length > 0);
-            if (videoDataEmpty && audioDataEmpty) {
-                const itemIndex = arr.findIndex(item => item.id === entry.id);
-                if (itemIndex !== -1) {
-                    console.log(`MediaCache: [Entry ${entry.id}] attemptimg to remove from arr due to successful processing and delete_entries flag. Arr size before: ${arr.length}`);
-                    arr.splice(itemIndex, 1);
-                    console.log(`MediaCache: [Entry ${entry.id}] removed. Arr size after: ${arr.length}. IDs: ${arr.map(e=>e.id.substring(0,8)).join(', ')}`);
-                }
+        if (entry.video?.data?.length > 0) singleDownload(entry.id, 'video');
+        if (entry.audio?.data?.length > 0) singleDownload(entry.id, 'audio');
+    }
+
+    // Common deletion logic based on whether data arrays are now empty
+    if (CUSTOM_BEHAVIOR.delete_entries_when_video_finishes) {
+        const videoDataEmpty = !(entry.video && entry.video.data.length > 0);
+        const audioDataEmpty = !(entry.audio && entry.audio.data.length > 0);
+        if (videoDataEmpty && audioDataEmpty) {
+            const itemIndex = arr.findIndex(item => item.id === entry.id);
+            if (itemIndex !== -1) {
+                console.log(`MediaCache: [Inst: ${scriptInstanceId}] [Entry ${entry.id}] attemptimg to remove from arr due to successful processing and delete_entries flag. Arr size before: ${arr.length}`);
+                arr.splice(itemIndex, 1);
+                console.log(`MediaCache: [Inst: ${scriptInstanceId}] [Entry ${entry.id}] removed. Arr size after: ${arr.length}. IDs: ${arr.map(e=>e.id.substring(0,8)).join(', ')}`);
             }
+        } else {
+            console.log(`MediaCache: [Inst: ${scriptInstanceId}] Entry ${entry.id} not deleted as data remains (muxing/download might have issues or user intervention needed).`);
         }
     }
 }
