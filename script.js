@@ -666,16 +666,28 @@ async function finalizeMuxingAndDownload(entry) {
         console.log("MediaCache: Starting muxing for entry:", entry.id); // This log seems redundant with the one above. Keeping one.
 
         try {
+            const videoMeta = {
+                decoderConfig: {
+                    colorSpace: {
+                        primaries: 'bt709',
+                        transfer: 'bt709',
+                        matrix: 'bt709',
+                        fullRange: false
+                    }
+                }
+            };
+            console.log(`MediaCache: [Entry ${entry.id}] Using video meta for addVideoChunkRaw:`, JSON.stringify(videoMeta, null, 2));
+
             // Feed video chunks
             console.log(`MediaCache: [Entry ${entry.id}] Feeding ${originalVideoData.length} video chunks to muxer.`);
-            for (const chunk of entry.video.data) { // Use current data for feeding
+            for (const chunk of entry.video.data) {
                 if (!entry.muxer) throw new Error("Muxer became null during video chunk processing.");
-                entry.muxer.addVideoChunkRaw(chunk.buffer, chunk.type, chunk.timestamp, chunk.duration);
+                entry.muxer.addVideoChunkRaw(chunk.buffer, chunk.type, chunk.timestamp, chunk.duration, videoMeta);
             }
 
             // Feed audio chunks
             console.log(`MediaCache: [Entry ${entry.id}] Feeding ${originalAudioData.length} audio chunks to muxer.`);
-            for (const chunk of entry.audio.data) { // Use current data for feeding
+            for (const chunk of entry.audio.data) {
                 if (!entry.muxer) throw new Error("Muxer became null during audio chunk processing.");
                 entry.muxer.addAudioChunkRaw(chunk.buffer, chunk.type, chunk.timestamp, chunk.duration);
             }
