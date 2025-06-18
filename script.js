@@ -168,8 +168,32 @@
     await start();
     const comms = new BroadcastChannel("CUSTOM_MEDIACACHE_EXTENSION_COMMUNICATION"); // This is replaced every time the extension is built
     window.addEventListener("beforeunload", () => {
-        startDownload();
-    })
+        if (CUSTOM_BEHAVIOR.download_content_when_video_finishes) {
+            for (const item of arr) {
+                if (item.writable) {
+                    item.writable?.close();
+                } else if (item.data && item.data.length > 0) {
+                    const blob = new Blob(item.data, { type: item.mimeType });
+                    const blobUrl = URL.createObjectURL(blob);
+                    comms.postMessage({
+                        from: "b", // Mark as from script.js, though background.js will handle it
+                        action: "downloadViaBackground",
+                        payload: {
+                            filename: item.title,
+                            url: blobUrl
+                        }
+                    });
+                    // item.data = []; // Clear data after sending for download
+                }
+            }
+        }
+        // The original startDownload() also handled deleting entries if CUSTOM_BEHAVIOR.delete_entries_when_video_finishes was true.
+        // This needs to be considered. For now, focusing on download.
+        // If CUSTOM_BEHAVIOR.delete_entries_when_video_finishes is true, we might want to clear 'arr' or specific items.
+        if (CUSTOM_BEHAVIOR.delete_entries_when_video_finishes) {
+            arr = []; // Clear all entries as per original behavior of startDownload related to this flag
+        }
+    });
     comms.onmessage = (msg) => {
         if (msg.data.from !== "a") return; // Receive requests only from the isolated content script
         switch (msg.data.action) {

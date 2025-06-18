@@ -93,49 +93,71 @@
      * A Map that contains all the available downloads from the various content script that are being run
      */
     const tabResultStorage = new Map();
-    document.getElementById("availableTabs").onchange = () => { // The user has changed the selected items in the tab
-        document.getElementById("availableDownloads").innerHTML = "";
-        for (const item of tabResultStorage.get(+document.getElementById("availableTabs").value)) { // Create a Card with all of the downloadable items of that folder
-            const card = document.createElement("div");
-            card.classList.add("card");
-            card.style.backgroundColor = "var(--cardsecond)";
-            card.style.marginBottom = "15px";
-            card.append(Object.assign(document.createElement("h3"), {
-                textContent: `${item.title} [ID: ${item.id}] [Mimetype: ${item.mimeType}]`,
-            }), Object.assign(document.createElement("button"), {
-                textContent: item.writable ? "Finalize stream" : "Download",
-                onclick: () => {
-                    browserToUse.tabs.sendMessage(+document.getElementById("availableTabs").value, { action: item.writable ? "fsFinalize" : "downloadThis", content: item.id });
+
+    function renderVideoTable() {
+        const tbody = document.getElementById("availableDownloadsTable").querySelector("tbody");
+        tbody.innerHTML = ""; // Clear existing rows
+
+        for (const [tabId, tabData] of tabResultStorage.entries()) {
+            if (tabData.videos && tabData.videos.length > 0) {
+                for (const item of tabData.videos) {
+                    const row = document.createElement("tr");
+
+                    const tabTitleCell = document.createElement("td");
+                    tabTitleCell.textContent = tabData.title;
+                    row.appendChild(tabTitleCell);
+
+                    const videoTitleCell = document.createElement("td");
+                    videoTitleCell.textContent = item.title;
+                    row.appendChild(videoTitleCell);
+
+                    const mimeTypeCell = document.createElement("td");
+                    mimeTypeCell.textContent = item.mimeType;
+                    row.appendChild(mimeTypeCell);
+
+                    const idCell = document.createElement("td");
+                    idCell.textContent = item.id;
+                    row.appendChild(idCell);
+
+                    const actionsCell = document.createElement("td");
+
+                    const downloadButton = document.createElement("button");
+                    downloadButton.textContent = item.writable ? "Finalize stream" : "Download";
+                    downloadButton.onclick = () => {
+                        browserToUse.tabs.sendMessage(tabId, { action: item.writable ? "fsFinalize" : "downloadThis", content: item.id });
+                        renderVideoTable(); // Refresh table
+                    };
+                    actionsCell.appendChild(downloadButton);
+
+                    if (!item.writable) {
+                        const deleteCurrentButton = document.createElement("button");
+                        deleteCurrentButton.textContent = "Delete current data";
+                        deleteCurrentButton.onclick = () => {
+                            browserToUse.tabs.sendMessage(tabId, { action: "deleteThis", content: { id: item.id, permanent: false } });
+                            renderVideoTable(); // Refresh table
+                        };
+                        actionsCell.appendChild(deleteCurrentButton);
+
+                        const deleteFutureButton = document.createElement("button");
+                        deleteFutureButton.textContent = "Delete current and future data";
+                        deleteFutureButton.onclick = () => {
+                            browserToUse.tabs.sendMessage(tabId, { action: "deleteThis", content: { id: item.id, permanent: true } });
+                            renderVideoTable(); // Refresh table
+                        };
+                        actionsCell.appendChild(deleteFutureButton);
+                    }
+                    row.appendChild(actionsCell);
+                    tbody.appendChild(row);
                 }
-            }));
-            !item.writable && card.append(document.createElement("br"),
-                document.createElement("br"),
-                Object.assign(document.createElement("label"), {
-                    style: "text-decoration: underline; margin-right: 10px;",
-                    textContent: "Delete current data",
-                    onclick: () => {
-                        browserToUse.tabs.sendMessage(+document.getElementById("availableTabs").value, { action: "deleteThis", content: { id: item.id, permanent: false } });
-                        card.remove();
-                    }
-                }),
-                Object.assign(document.createElement("label"), {
-                    textContent: "Delete current and future data",
-                    style: "text-decoration: underline",
-                    onclick: () => {
-                        browserToUse.tabs.sendMessage(+document.getElementById("availableTabs").value, { action: "deleteThis", content: { id: item.id, permanent: true } });
-                        card.remove();
-                    }
-                }));
-            document.getElementById("availableDownloads").append(card);
+            }
         }
-        browserToUse.tabs.sendMessage(+document.getElementById("availableTabs").value, { action: "getChoices" });
     }
+
     browserToUse.runtime.onMessage.addListener((msg) => {
         switch (msg.action) {
             case "getDownloads": { // Received an array of the items available to download
-                if (!tabResultStorage.get(msg.context.id)) document.getElementById("availableTabs").append(Object.assign(document.createElement("option"), { textContent: msg.context.title, value: msg.context.id }));
-                tabResultStorage.set(msg.context.id, msg.content);
-                if (document.getElementById("availableTabs").children.length === 1) document.getElementById("availableTabs").dispatchEvent(new Event("change"));
+                tabResultStorage.set(msg.context.id, { title: msg.context.title, videos: msg.content });
+                renderVideoTable();
                 break;
             }
             case "getChoices": { // Update the "After downloading, do this..." choices
@@ -164,10 +186,12 @@
         checkbox.addEventListener("change", () => {
             const [checked, property] = [checkbox.checked, checkbox.getAttribute("data-updatechoice")];
             browserToUse.storage.sync.set({ [property]: checked });
-            browserToUse.tabs.sendMessage(+document.getElementById("availableTabs").value, {
-                action: "updateChoices",
-                content: { [property]: checked }
-            });
+            for (const tabId of tabResultStorage.keys()) {
+                browserToUse.tabs.sendMessage(tabId, {
+                    action: "updateChoices",
+                    content: { [property]: checked }
+                });
+            }
         });
     }
     browserToUse.tabs.sendMessage(ids[0].id, { action: "getChoices" }); // Ask the current choices to the script.

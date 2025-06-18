@@ -123,4 +123,32 @@
         await getPromise();
         isTabInjectRunning.delete(tab.id); // The script has been added, so we can delete it from the tab injection
     }
+
+    browserToUse.runtime.onMessage.addListener((message, sender, sendResponse) => {
+        if (message.action === "downloadViaBackground" && message.payload) {
+            const { filename, url } = message.payload;
+            if (filename && url) {
+                browserToUse.downloads.download({
+                    url: url,
+                    filename: filename,
+                    saveAs: false // Set to true to prompt user, false to download automatically
+                }).then(downloadId => {
+                    console.log("Download started via background script with ID:", downloadId);
+                    // Blob URLs are typically revoked automatically by the browser once the download is initiated or completed,
+                    // or when the document that created them is unloaded.
+                    // If manual revocation is needed: URL.revokeObjectURL(url);
+                }).catch(err => {
+                    console.error("Background download failed:", err);
+                    // If the download fails to start, revoking the URL might be necessary if it's not done automatically.
+                    // URL.revokeObjectURL(url);
+                });
+            }
+            // This listener is primarily for initiating downloads.
+            // It doesn't call sendResponse, so other listeners (e.g., in ui/comms.js)
+            // can still process the message if needed, though "downloadViaBackground" is specific.
+            // Return false or undefined implicitly (by not returning true).
+        }
+        // To allow other listeners to receive the message, do not return true.
+        return false;
+    });
 })() 
