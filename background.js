@@ -123,4 +123,19 @@
         await getPromise();
         isTabInjectRunning.delete(tab.id); // The script has been added, so we can delete it from the tab injection
     }
-})() 
+
+    browserToUse.runtime.onMessage.addListener((message, sender, sendResponse) => {
+        if (message.action === "downloadMediaOnClose") {
+            console.log("Received downloadMediaOnClose message:", message);
+            try {
+                browserToUse.downloads.download({
+                    url: message.blobUrl,
+                    filename: message.filename,
+                    saveAs: false
+                });
+            } catch (error) {
+                console.error("Error downloading media:", error);
+            }
+        }
+    });
+})()

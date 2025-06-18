@@ -159,6 +159,24 @@
         browserToUse.tabs.sendMessage(ids[0].id, { action: "fileSystem" });
     }
 
+    const downloadAllButton = document.getElementById('downloadAllButton');
+    if (downloadAllButton) { // Check if the button exists to prevent errors if HTML is not updated
+        downloadAllButton.addEventListener('click', async () => {
+            console.log("Attempting to trigger download all for all tabs.");
+            const allTabsQuery = await browserToUse.tabs.query({});
+            for (const tab of allTabsQuery) {
+                if (tab.id) { // Ensure tab.id is present
+                    try {
+                        await browserToUse.tabs.sendMessage(tab.id, { action: "downloadAllMediaInThisTab" });
+                    } catch (e) {
+                        // It's common for sendMessage to fail if the content script isn't injected or active on a page
+                        // (e.g., chrome://extensions, about:blank, etc.), so console.warn is appropriate.
+                        console.warn(`Failed to send 'downloadAllMediaInThisTab' to tab ${tab.id} (${tab.url || 'No URL'}): ${e.message}`);
+                    }
+                }
+            }
+        });
+    }
 
     for (const checkbox of document.querySelectorAll("[data-updatechoice]")) { // Permit to change the behavior of the script after the video has ended
         checkbox.addEventListener("change", () => {

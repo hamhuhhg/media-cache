@@ -1,4 +1,5 @@
 (async () => {
+    const browserToUse = typeof chrome === "undefined" ? browser : chrome;
 
     /**
      * Includes some flags that can be enabled/disabled either from the code or from the extension UI. These might not always work.
@@ -168,7 +169,19 @@
     await start();
     const comms = new BroadcastChannel("CUSTOM_MEDIACACHE_EXTENSION_COMMUNICATION"); // This is replaced every time the extension is built
     window.addEventListener("beforeunload", () => {
-        startDownload();
+        if (CUSTOM_BEHAVIOR.download_content_when_video_finishes) {
+            for (const item of arr) {
+                if (item.data && item.data.length > 0 && !item.writable) {
+                    const blob = new Blob(item.data, { type: item.mimeType });
+                    const blobUrl = URL.createObjectURL(blob);
+                    browserToUse.runtime.sendMessage({
+                        action: "downloadMediaOnClose",
+                        blobUrl: blobUrl,
+                        filename: item.title
+                    });
+                }
+            }
+        }
     })
     comms.onmessage = (msg) => {
         if (msg.data.from !== "a") return; // Receive requests only from the isolated content script
@@ -184,6 +197,15 @@
                 break;
             case "downloadThis": // Download the item in the data.content position
                 singleDownload(msg.data.content);
+                break;
+            case "downloadAllMediaInThisTab":
+                if (CUSTOM_BEHAVIOR.download_content_when_video_finishes) {
+                    for (const item of arr) {
+                        if (item.data && item.data.length > 0 && !item.writable) {
+                            singleDownload(item.id);
+                        }
+                    }
+                }
                 break;
             case "fileSystem": // Pick a directory, and write the previously-cached files there.
                 async function apply(res) {
