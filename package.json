@@ -1,6 +1,11 @@
 {
   "dependencies": {
     "@types/chrome": "^0.0.270",
-    "jszip": "^3.10.1"
+    "jszip": "^3.10.1",
+    "download-git-repo": "^3.0.2",
+    "yargs": "^17.0.0"
+  },
+  "scripts": {
+    "package": "node create_extension_packages.js"
   }
 }
