@@ -74,21 +74,43 @@ async function createPackage(isFirefox, projectRootPath) {
         const stagingDir = fs.mkdtempSync(path.join(os.tmpdir(), `firefox-build-${shortChannelId}-`));
         console.log(`Created temporary staging directory for Firefox: ${stagingDir}`);
 
+        // Helper function to create unsigned zip
+        async function createUnsignedFirefoxZip(currentStagingDir, currentShortChannelId) {
+            console.log("Creating an unsigned ZIP package for Firefox...");
+            const zip = new jszip(); // Ensure jszip is required at the top
+            function addFilesToZip(currentPathInStaging, zipPathPrefix) {
+                const entries = fs.readdirSync(currentPathInStaging, { withFileTypes: true });
+                for (const entry of entries) {
+                    const fullEntryPath = path.join(currentPathInStaging, entry.name);
+                    const zipEntryPath = path.join(zipPathPrefix, entry.name).replace(/\\/g, '/'); // Ensure forward slashes for zip
+                    if (entry.isDirectory()) {
+                        addFilesToZip(fullEntryPath, zipEntryPath);
+                    } else {
+                        zip.file(zipEntryPath, fs.readFileSync(fullEntryPath));
+                    }
+                }
+            }
+            addFilesToZip(currentStagingDir, '');
+
+            const unsignedOutputFileName = path.join(process.cwd(), `media_cache_firefox_unsigned-${currentShortChannelId}.zip`);
+            const buffer = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE', compressionOptions: { level: 9 } });
+            fs.writeFileSync(unsignedOutputFileName, buffer);
+            console.log(`Successfully created unsigned Firefox package: ${unsignedOutputFileName}`);
+            return unsignedOutputFileName;
+        }
+
         try {
             console.log(`Populating staging directory with adapted files...`);
-            for (const relativeFilePath of FILES_TO_PACKAGE) { // FILES_TO_PACKAGE is a global constant
+            for (const relativeFilePath of FILES_TO_PACKAGE) { // FILES_TO_PACKAGE is global
                 const sourceFilePath = path.join(projectRootPath, relativeFilePath);
                 const destFilePath = path.join(stagingDir, relativeFilePath);
-
                 if (!fs.existsSync(sourceFilePath)) {
                     console.error(`Error: Source file not found - ${sourceFilePath}`);
                     throw new Error(`Required file not found in source project: ${relativeFilePath}`);
                 }
-
                 const fileDataRaw = fs.readFileSync(sourceFilePath);
                 fs.mkdirSync(path.dirname(destFilePath), { recursive: true });
-                // adaptContent is a global function
-                const adaptedContent = adaptContent(sourceFilePath, fileDataRaw, true, channelId);
+                const adaptedContent = adaptContent(sourceFilePath, fileDataRaw, true, channelId); // adaptContent is global
                 fs.writeFileSync(destFilePath, adaptedContent);
             }
             console.log(`Adapted files copied to staging directory: ${stagingDir}`);
@@ -98,35 +120,44 @@ async function createPackage(isFirefox, projectRootPath) {
 
             if (apiKey && apiSecret) {
                 console.log("AMO API credentials (AMO_JWT_ISSUER, AMO_JWT_SECRET) found. Attempting to sign the Firefox extension...");
-
                 const artifactsDir = process.cwd();
                 const webExtCliPath = path.join('node_modules', 'web-ext', 'dist', 'web-ext.js');
 
                 if (!fs.existsSync(webExtCliPath)) {
-                    console.error(`Error: Could not find web-ext CLI script at "${webExtCliPath}". This path is expected when "web-ext" is installed as a project dependency (in node_modules). Please ensure dependencies are correctly installed by running "npm install".`);
-                    throw new Error('web-ext CLI script not found at expected path. Run "npm install".');
+                     console.error(`Error: Could not find web-ext CLI script at "${webExtCliPath}". This path is expected when "web-ext" is installed as a project dependency. Please ensure dependencies are correctly installed by running "npm install".`);
+                     throw new Error('web-ext CLI script not found at expected path. Run "npm install".');
                 }
+
+                const filesBeforeSign = new Set(fs.readdirSync(artifactsDir));
 
                 console.log(`Running web-ext sign using "node ${webExtCliPath}". Source: "${stagingDir}", Artifacts output directory: "${artifactsDir}"`);
 
                 const webExtArgs = [
-                    'sign',
-                    '--source-dir', stagingDir,
-                    '--api-key', apiKey,
-                    '--api-secret', apiSecret,
-                    '--artifacts-dir', artifactsDir
+                    'sign', '--source-dir', stagingDir, '--api-key', apiKey,
+                    '--api-secret', apiSecret, '--artifacts-dir', artifactsDir
                 ];
-
+                // spawn is required from child_process at the top
                 const webExtProcess = spawn('node', [webExtCliPath, ...webExtArgs], { stdio: 'inherit' });
 
                 await new Promise((resolve, reject) => {
-                    webExtProcess.on('close', (code) => {
+                    webExtProcess.on('close', async (code) => { // make callback async
                         if (code === 0) {
-                            console.log(`web-ext sign completed successfully. Signed XPI should be in "${artifactsDir}".`);
-                            resolve();
+                            console.log('web-ext sign process completed successfully (exit code 0). Verifying .xpi file creation...');
+                            const filesAfterSign = fs.readdirSync(artifactsDir);
+                            const newXpiFiles = filesAfterSign.filter(f => f.toLowerCase().endsWith('.xpi') && !filesBeforeSign.has(f));
+
+                            if (newXpiFiles.length > 0) {
+                                newXpiFiles.forEach(f => console.log(`Successfully found signed package: ${path.join(artifactsDir, f)}`));
+                                resolve();
+                            } else {
+                                console.error("Error: `web-ext sign` reported success (exit code 0), but no new .xpi file was found in the artifacts directory.");
+                                console.log("Creating an unsigned ZIP package as a fallback.");
+                                await createUnsignedFirefoxZip(stagingDir, shortChannelId);
+                                reject(new Error('Signing reported success but no .xpi file was produced; unsigned ZIP created as fallback. Build failed for signing.'));
+                            }
                         } else {
                             console.error(`web-ext sign failed with exit code ${code}.`);
-                            reject(new Error(`web-ext sign process failed. Review output above for details from web-ext.`));
+                            reject(new Error(`web-ext sign process failed with exit code ${code}. Review output above for details from web-ext.`));
                         }
                     });
                     webExtProcess.on('error', (err) => {
@@ -134,60 +165,33 @@ async function createPackage(isFirefox, projectRootPath) {
                         reject(err);
                     });
                 });
-
             } else {
                 console.warn("Warning: AMO API credentials (AMO_JWT_ISSUER, AMO_JWT_SECRET) not found in environment variables.");
-                console.log("Creating an unsigned ZIP package for Firefox instead.");
-
-                const zip = new jszip(); // jszip is required at the top
-                function addFilesToZip(currentPathInStaging, zipPathPrefix) {
-                    const entries = fs.readdirSync(currentPathInStaging, { withFileTypes: true });
-                    for (const entry of entries) {
-                        const fullEntryPath = path.join(currentPathInStaging, entry.name);
-                        const zipEntryPath = path.join(zipPathPrefix, entry.name).replace(/\\/g, '/');
-                        if (entry.isDirectory()) {
-                            addFilesToZip(fullEntryPath, zipEntryPath);
-                        } else {
-                            zip.file(zipEntryPath, fs.readFileSync(fullEntryPath));
-                        }
-                    }
-                }
-                addFilesToZip(stagingDir, '');
-
-                const unsignedOutputFileName = path.join(process.cwd(), `media_cache_firefox_unsigned-${shortChannelId}.zip`);
-                const buffer = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE', compressionOptions: { level: 9 } });
-                fs.writeFileSync(unsignedOutputFileName, buffer);
-                console.log(`Successfully created unsigned Firefox package: ${unsignedOutputFileName}`);
+                await createUnsignedFirefoxZip(stagingDir, shortChannelId);
             }
-
         } finally {
             if (stagingDir && fs.existsSync(stagingDir)) {
                 console.log(`Cleaning up Firefox staging directory: ${stagingDir}`);
                 try {
-                    if (fs.rmSync) {
-                        fs.rmSync(stagingDir, { recursive: true, force: true });
-                    } else {
-                        fs.rmdirSync(stagingDir, { recursive: true });
-                    }
+                    if (fs.rmSync) { fs.rmSync(stagingDir, { recursive: true, force: true }); }
+                    else { fs.rmdirSync(stagingDir, { recursive: true }); }
                 } catch (e) {
                     console.error(`Failed to cleanup staging directory ${stagingDir}: ${e.message}. Please remove it manually.`);
                 }
             }
         }
-
-    } else { // For Chrome (non-Firefox builds)
+    } else { // For Chrome
         console.log(`Starting Chrome package creation from source: ${projectRootPath}`);
         console.log(`Using Channel ID: ${channelId} (short: ${shortChannelId})`);
-        const zip = new jszip(); // jszip is required at the top
-        for (const relativeFilePath of FILES_TO_PACKAGE) { // FILES_TO_PACKAGE is a global constant
+        const zip = new jszip(); // Ensure jszip is required at the top
+        for (const relativeFilePath of FILES_TO_PACKAGE) { // FILES_TO_PACKAGE is global
             const fullFilePath = path.join(projectRootPath, relativeFilePath);
             if (!fs.existsSync(fullFilePath)) {
                 console.error(`Error: File not found in source - ${fullFilePath}`);
                 throw new Error(`Required file not found in source project: ${relativeFilePath}`);
             }
             const fileDataRaw = fs.readFileSync(fullFilePath);
-            // adaptContent is a global function
-            const adaptedData = adaptContent(fullFilePath, fileDataRaw, false, channelId);
+            const adaptedData = adaptContent(fullFilePath, fileDataRaw, false, channelId); // adaptContent is global
             zip.file(relativeFilePath, adaptedData);
         }
         const outputFileName = path.join(process.cwd(), `media_cache_chrome-${shortChannelId}.zip`);
