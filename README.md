@@ -74,8 +74,8 @@ If you want to build the extension packages (`.zip` or `.xpi` files for Chrome a
 
 ### Prerequisites
 
-*   **Node.js:** You'll need Node.js installed (which includes npm). You can download it from [nodejs.org](https://nodejs.org/).
-    (The `web-ext` tool for Firefox signing is now included as a project dependency and will be installed automatically with `npm install`.)
+*   **Node.js:** You'll need Node.js installed (which includes npm). You can download it from [nodejs.org](https://nodejs.org/). It's also recommended to ensure that the installation directory for Node.js and npm (which includes `npx`) is correctly added to your system's PATH environment variable for general command-line tool compatibility, although the build script attempts to run `web-ext` directly from project dependencies.
+    (The `web-ext` tool for Firefox signing is included as a project dependency and will be installed automatically with `npm install`.)
 
 ### Setup
 
