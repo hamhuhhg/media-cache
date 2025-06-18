@@ -4,8 +4,9 @@ const jszip = require('jszip');
 const crypto = require('crypto');
 const download = require('download-git-repo');
 const os = require('os');
-const yargs = require('yargs/yargs'); // Added
-const { hideBin } = require('yargs/helpers'); // Added
+const yargs = require('yargs/yargs');
+const { hideBin } = require('yargs/helpers');
+const { spawn } = require('child_process'); // Added
 
 const FILES_TO_PACKAGE = [
     "manifest.json",
@@ -63,47 +64,133 @@ function adaptContent(fullFilePath, fileDataRaw, isFirefox, channelId) {
     return contentStr;
 }
 
+// New createPackage function starts here
 async function createPackage(isFirefox, projectRootPath) {
-    const zip = new jszip();
     const channelId = crypto.randomUUID().replace(/-/g, '');
+    const shortChannelId = channelId.substring(0, 8);
 
-    console.log(`Starting package creation for ${isFirefox ? 'Firefox' : 'Chrome'} from source: ${projectRootPath}`);
-    console.log(`Using Channel ID: ${channelId}`);
+    if (isFirefox) {
+        console.log(`Starting Firefox package creation from source: ${projectRootPath}`);
+        const stagingDir = fs.mkdtempSync(path.join(os.tmpdir(), `firefox-build-${shortChannelId}-`));
+        console.log(`Created temporary staging directory for Firefox: ${stagingDir}`);
 
-    for (const relativeFilePath of FILES_TO_PACKAGE) {
-        const fullFilePath = path.join(projectRootPath, relativeFilePath);
         try {
+            console.log(`Populating staging directory with adapted files...`);
+            for (const relativeFilePath of FILES_TO_PACKAGE) {
+                const sourceFilePath = path.join(projectRootPath, relativeFilePath);
+                const destFilePath = path.join(stagingDir, relativeFilePath);
+
+                if (!fs.existsSync(sourceFilePath)) {
+                    console.error(`Error: Source file not found - ${sourceFilePath}`);
+                    throw new Error(`Required file not found in source project: ${relativeFilePath}`);
+                }
+
+                const fileDataRaw = fs.readFileSync(sourceFilePath);
+                fs.mkdirSync(path.dirname(destFilePath), { recursive: true });
+                const adaptedContent = adaptContent(sourceFilePath, fileDataRaw, true, channelId);
+                fs.writeFileSync(destFilePath, adaptedContent);
+            }
+            console.log(`Adapted files copied to staging directory: ${stagingDir}`);
+
+            const apiKey = process.env.AMO_JWT_ISSUER;
+            const apiSecret = process.env.AMO_JWT_SECRET;
+
+            if (apiKey && apiSecret) {
+                console.log("AMO API credentials (AMO_JWT_ISSUER, AMO_JWT_SECRET) found. Attempting to sign the Firefox extension...");
+
+                const artifactsDir = process.cwd();
+
+                console.log(`Running web-ext sign. Source: "${stagingDir}", Artifacts output directory: "${artifactsDir}"`);
+
+                const webExtArgs = [
+                    'sign',
+                    '--source-dir', stagingDir,
+                    '--api-key', apiKey,
+                    '--api-secret', apiSecret,
+                    '--artifacts-dir', artifactsDir
+                ];
+
+                const webExtProcess = spawn('npx', ['web-ext', ...webExtArgs], { stdio: 'inherit' });
+
+                await new Promise((resolve, reject) => {
+                    webExtProcess.on('close', (code) => {
+                        if (code === 0) {
+                            console.log(`web-ext sign completed successfully. Signed XPI should be in "${artifactsDir}".`);
+                            resolve();
+                        } else {
+                            console.error(`web-ext sign failed with exit code ${code}.`);
+                            reject(new Error(`web-ext sign process failed. Review output for details.`));
+                        }
+                    });
+                    webExtProcess.on('error', (err) => {
+                        console.error('Failed to start or run web-ext process. Ensure "web-ext" is installed (it should be a dependency) and "npx" is available.', err);
+                        reject(err);
+                    });
+                });
+
+            } else {
+                console.warn("Warning: AMO API credentials (AMO_JWT_ISSUER, AMO_JWT_SECRET) not found in environment variables.");
+                console.log("Creating an unsigned ZIP package for Firefox instead.");
+
+                const zip = new jszip();
+                function addFilesToZip(currentPathInStaging, zipPathPrefix) {
+                    const entries = fs.readdirSync(currentPathInStaging, { withFileTypes: true });
+                    for (const entry of entries) {
+                        const fullEntryPath = path.join(currentPathInStaging, entry.name);
+                        const zipEntryPath = path.join(zipPathPrefix, entry.name).replace(/\\/g, '/'); // Ensure forward slashes in zip
+                        if (entry.isDirectory()) {
+                            addFilesToZip(fullEntryPath, zipEntryPath);
+                        } else {
+                            zip.file(zipEntryPath, fs.readFileSync(fullEntryPath));
+                        }
+                    }
+                }
+                addFilesToZip(stagingDir, '');
+
+                const unsignedOutputFileName = path.join(process.cwd(), `media_cache_firefox_unsigned-${shortChannelId}.zip`);
+                const buffer = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE', compressionOptions: { level: 9 } });
+                fs.writeFileSync(unsignedOutputFileName, buffer);
+                console.log(`Successfully created unsigned Firefox package: ${unsignedOutputFileName}`);
+            }
+
+        } finally {
+            if (stagingDir && fs.existsSync(stagingDir)) {
+                console.log(`Cleaning up Firefox staging directory: ${stagingDir}`);
+                try {
+                    if (fs.rmSync) {
+                        fs.rmSync(stagingDir, { recursive: true, force: true });
+                    } else {
+                        fs.rmdirSync(stagingDir, { recursive: true });
+                    }
+                } catch (e) {
+                    console.error(`Failed to cleanup staging directory ${stagingDir}: ${e.message}. Please remove it manually.`);
+                }
+            }
+        }
+
+    } else { // For Chrome (non-Firefox builds)
+        console.log(`Starting Chrome package creation from source: ${projectRootPath}`);
+        console.log(`Using Channel ID: ${channelId} (short: ${shortChannelId})`);
+        const zip = new jszip();
+        for (const relativeFilePath of FILES_TO_PACKAGE) {
+            const fullFilePath = path.join(projectRootPath, relativeFilePath);
             if (!fs.existsSync(fullFilePath)) {
                 console.error(`Error: File not found in source - ${fullFilePath}`);
                 throw new Error(`Required file not found in source project: ${relativeFilePath}`);
             }
             const fileDataRaw = fs.readFileSync(fullFilePath);
-            const adaptedData = adaptContent(fullFilePath, fileDataRaw, isFirefox, channelId);
+            const adaptedData = adaptContent(fullFilePath, fileDataRaw, false, channelId);
             zip.file(relativeFilePath, adaptedData);
-        } catch (error) {
-            // Log additional context before re-throwing
-            console.error(`Error processing file "${relativeFilePath}" from "${projectRootPath}": ${error.message}`);
-            throw error;
         }
-    }
-
-    // Output ZIP files to the current working directory of the script
-    const outputFileName = path.join(process.cwd(), `media_cache_${isFirefox ? 'firefox' : 'chrome'}.zip`);
-    try {
-        const buffer = await zip.generateAsync({
-            type: 'nodebuffer',
-            compression: 'DEFLATE',
-            compressionOptions: { level: 9 }
-        });
+        const outputFileName = path.join(process.cwd(), `media_cache_chrome-${shortChannelId}.zip`);
+        const buffer = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE', compressionOptions: { level: 9 } });
         fs.writeFileSync(outputFileName, buffer);
-        console.log(`Successfully created ${outputFileName}`);
-    } catch (error) {
-        console.error(`Error writing ZIP file ${outputFileName}: ${error.message}`);
-        throw error;
+        console.log(`Successfully created Chrome package: ${outputFileName}`);
     }
 }
+// End of new createPackage function
 
-// New IIFE using yargs
+// IIFE using yargs (should be unchanged from previous step)
 (async () => {
     let projectRootPath;
     let tempDir = null;
