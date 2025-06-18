@@ -4,7 +4,7 @@
      * @type chrome
      */
     const browserToUse = typeof chrome === "undefined" ? browser : chrome;
-    const result = await new Promise((res) => browserToUse.storage.sync.get("urls", res));
+    // const result = await new Promise((res) => browserToUse.storage.sync.get("urls", res)); // Removed as per new logic
     /**
      * Convert a wildcard to a regex.
      * _Made by Claude, since I wouldn't be able to write something like this_
@@ -32,26 +32,64 @@
      * @param {chrome.tabs.Tab} tab the tab to check
      */
     async function eventTabChange(tab) {
-        const result = await new Promise((resolve) => browserToUse.storage.sync.get("urls", resolve));
-        if (result.urls && result.urls.length > 0) {
-            if (result.urls.some(pattern => { // Check that tab URL is allowed from the extension settings
-                try {
-                    const regex = wildcardToRegex(pattern).replaceAll("\\.", ".");
-                    const url = tab.url.trim();
-                    return new RegExp(regex).test(url);
-                } catch (ex) {
-                    return false;
+        const data = await new Promise((resolve) => browserToUse.storage.sync.get({ automaticModeEnabled: true, urls: [] }, resolve));
+        if (data.automaticModeEnabled) {
+            if (tab && tab.url && (tab.url.startsWith('http://') || tab.url.startsWith('https://'))) {
+                await tabInject(tab);
+            }
+        } else {
+            if (data.urls && data.urls.length > 0 && tab && tab.url) {
+                for (const pattern of data.urls) {
+                    try {
+                        const regex = wildcardToRegex(pattern); // .replaceAll is not needed here if wildcardToRegex is preserved
+                        const url = tab.url.trim();
+                        if (new RegExp(regex).test(url)) {
+                            await tabInject(tab);
+                            break;
+                        }
+                    } catch (ex) {
+                        console.error("Error processing pattern:", pattern, ex);
+                    }
                 }
-            })) await tabInject(tab);
+            }
         }
     }
-    browserToUse.tabs.onUpdated.addListener((_, __, tab) => {
-        eventTabChange(tab);
+
+    browserToUse.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+        if (changeInfo.status === 'complete' && tab && tab.url && (tab.url.startsWith('http://') || tab.url.startsWith('https://'))) {
+            eventTabChange(tab);
+        }
     });
-    if (result.urls) { // When the extension is being activated, check the URLs that have been previously stored and run the scripts there
-        const queryUrl = await new Promise((resolve) => browserToUse.tabs.query({ url: result.urls }, resolve));
-        for (const tab of queryUrl) await tabInject(tab)
-    }
+
+    // Initial tab processing logic on extension startup
+    (async () => {
+        const startupSettings = await new Promise((resolve) => browserToUse.storage.sync.get({ automaticModeEnabled: true, urls: [] }, resolve));
+        const allTabs = await new Promise((resolve) => browserToUse.tabs.query({}, resolve));
+
+        for (const currentTab of allTabs) {
+            if (currentTab && currentTab.url && (currentTab.url.startsWith('http://') || currentTab.url.startsWith('https://'))) {
+                if (startupSettings.automaticModeEnabled) {
+                    await tabInject(currentTab);
+                } else {
+                    if (startupSettings.urls && startupSettings.urls.length > 0) {
+                        for (const pattern of startupSettings.urls) {
+                            try {
+                                const regex = wildcardToRegex(pattern);
+                                const url = currentTab.url.trim();
+                                if (new RegExp(regex).test(url)) {
+                                    await tabInject(currentTab);
+                                    break;
+                                }
+                            } catch (ex) {
+                                console.error("Error processing pattern during startup:", pattern, ex);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    })();
+
     /**
      * Inject the content scripts in the tab
      * @param {chrome.tabs.Tab} tab the Tab in which the scripts will be injected
@@ -72,7 +110,7 @@
                             files: ['script.js'],
                             world: "MAIN"
                         });
-                        browserToUse.tabs.sendMessage(ids[0].id, { // Update user preferences
+                        browserToUse.tabs.sendMessage(tab.id, { // Update user preferences - CORRECTED tab.id
                             action: "updateChoices",
                             content: await browserToUse.storage.sync.get(["finalize_fs_stream_when_video_finishes", "delete_entries_when_video_finishes", "download_content_when_video_finishes"])
                         });

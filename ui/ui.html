@@ -20,6 +20,14 @@
         <p>Download the media content you see on websites</p>
     </header>
     <main>
+        <div class="card">
+            <h2>Automatic Mode</h2>
+            <label class="flex hcenter gap">
+                <input type="checkbox" id="automaticModeToggle">
+                Run automatically on all websites (extension loads on all pages by default)
+            </label>
+        </div>
+        <br>
         <div class="card" id="notWorking" style="background-color: darkred; display: none;">
             <h2>The script isn't running on this page.</h2>
             <p>Make sure you've added this hostname in the list, then close the webpage and open it again.
@@ -27,7 +35,7 @@
                 extension before the website loads the video content.</p>
             <button id="forceRun">Force script run</button>
         </div><br>
-        <div class="card">
+        <div class="card" id="allowedSitesCard">
             <h2>Allowed sites:</h2>
             <p>MediaCache automatically stores the video/audio data of the following sites. While only a few have been
                 tested, the extension should work with every website that uses the MediaSource API. Please make sure to

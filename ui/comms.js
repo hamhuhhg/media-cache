@@ -11,6 +11,28 @@
     const ids = await new Promise((resolve) => {
         browserToUse.tabs.query({ active: true }, resolve)
     })
+
+    // Automatic Mode Toggle Logic
+    const automaticModeToggle = document.getElementById('automaticModeToggle');
+    const allowedSitesCard = document.getElementById('allowedSitesCard');
+
+    function updateAllowedSitesVisibility(isAutomaticModeOn) {
+        if (isAutomaticModeOn) {
+            allowedSitesCard.style.display = 'none';
+        } else {
+            allowedSitesCard.style.display = 'block';
+        }
+    }
+
+    browserToUse.storage.sync.get({ automaticModeEnabled: true }, (data) => {
+        automaticModeToggle.checked = data.automaticModeEnabled;
+        updateAllowedSitesVisibility(data.automaticModeEnabled);
+    });
+    automaticModeToggle.addEventListener('change', (event) => {
+        browserToUse.storage.sync.set({ automaticModeEnabled: event.target.checked });
+        updateAllowedSitesVisibility(event.target.checked);
+    });
+
     /**
      * Check that the extension is enabled and is working
      */
