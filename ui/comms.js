@@ -4,6 +4,37 @@
      * @type chrome
      */
     const browserToUse = typeof chrome === "undefined" ? browser : chrome;
+
+    const enableAllSitesModeCheckbox = document.getElementById('enableAllSitesModeCheckbox');
+    const newHostnameInput = document.getElementById('newHostname');
+    const addHostnameButton = document.getElementById('addHostname');
+    const allowedListUl = document.getElementById('allowedList');
+    const allowedSitesStatusMessageP = document.getElementById('allowedSitesStatusMessage');
+    const downloadAllButton = document.getElementById('downloadAllButton');
+
+    function updateAllowedSitesUI(enabled) {
+        newHostnameInput.disabled = enabled;
+        addHostnameButton.disabled = enabled;
+        if (enabled) {
+            allowedListUl.style.opacity = 0.5;
+            allowedSitesStatusMessageP.textContent = "Currently active on all sites. The list below is not in use.";
+        } else {
+            allowedListUl.style.opacity = 1;
+            allowedSitesStatusMessageP.textContent = "";
+        }
+    }
+
+    browserToUse.storage.sync.get({ enableAllSitesMode: false }, (data) => {
+        enableAllSitesModeCheckbox.checked = data.enableAllSitesMode;
+        updateAllowedSitesUI(data.enableAllSitesMode);
+    });
+
+    enableAllSitesModeCheckbox.addEventListener('change', (event) => {
+        const enabled = event.target.checked;
+        browserToUse.storage.sync.set({ enableAllSitesMode: enabled });
+        updateAllowedSitesUI(enabled);
+    });
+
     /**
      * Get the ID of the current tab
      * @type chrome.tabs.Tab[]
@@ -71,43 +102,159 @@
      * A Map that contains all the available downloads from the various content script that are being run
      */
     const tabResultStorage = new Map();
-    document.getElementById("availableTabs").onchange = () => { // The user has changed the selected items in the tab
-        document.getElementById("availableDownloads").innerHTML = "";
-        for (const item of tabResultStorage.get(+document.getElementById("availableTabs").value)) { // Create a Card with all of the downloadable items of that folder
-            const card = document.createElement("div");
-            card.classList.add("card");
-            card.style.backgroundColor = "var(--cardsecond)";
-            card.style.marginBottom = "15px";
-            card.append(Object.assign(document.createElement("h3"), {
-                textContent: `${item.title} [ID: ${item.id}] [Mimetype: ${item.mimeType}]`,
-            }), Object.assign(document.createElement("button"), {
-                textContent: item.writable ? "Finalize stream" : "Download",
-                onclick: () => {
-                    browserToUse.tabs.sendMessage(+document.getElementById("availableTabs").value, { action: item.writable ? "fsFinalize" : "downloadThis", content: item.id });
-                }
-            }));
-            !item.writable && card.append(document.createElement("br"),
-                document.createElement("br"),
-                Object.assign(document.createElement("label"), {
-                    style: "text-decoration: underline; margin-right: 10px;",
-                    textContent: "Delete current data",
-                    onclick: () => {
-                        browserToUse.tabs.sendMessage(+document.getElementById("availableTabs").value, { action: "deleteThis", content: { id: item.id, permanent: false } });
-                        card.remove();
-                    }
-                }),
-                Object.assign(document.createElement("label"), {
-                    textContent: "Delete current and future data",
-                    style: "text-decoration: underline",
-                    onclick: () => {
-                        browserToUse.tabs.sendMessage(+document.getElementById("availableTabs").value, { action: "deleteThis", content: { id: item.id, permanent: true } });
-                        card.remove();
-                    }
-                }));
-            document.getElementById("availableDownloads").append(card);
+
+    downloadAllButton.addEventListener('click', () => {
+        if (tabResultStorage.size === 0) {
+            alert("No videos available to download from any tab.");
+            return;
         }
-        browserToUse.tabs.sendMessage(+document.getElementById("availableTabs").value, { action: "getChoices" });
+
+        let itemsToDownloadFound = false;
+        for (const [tabId, videoArray] of tabResultStorage.entries()) {
+            if (videoArray && videoArray.length > 0) {
+                videoArray.forEach(videoItem => {
+                    // Ensure the videoItem itself isn't null or undefined, and has an id
+                    if (videoItem && videoItem.id) {
+                        itemsToDownloadFound = true;
+                        if (videoItem.writable) {
+                            browserToUse.tabs.sendMessage(tabId, { action: "fsFinalize", content: videoItem.id })
+                                .catch(err => console.warn(`Error finalizing FS for item ${videoItem.id} in tab ${tabId}:`, err));
+                        } else {
+                            // Also check if videoItem.data exists or if it's already downloaded (not explicitly tracked here, but script.js handles empty data)
+                            // The script.js singleDownload checks for data.length === 0.
+                            browserToUse.tabs.sendMessage(tabId, { action: "downloadThis", content: videoItem.id })
+                                .catch(err => console.warn(`Error downloading item ${videoItem.id} in tab ${tabId}:`, err));
+                        }
+                    }
+                });
+            }
+        }
+
+        if (itemsToDownloadFound) {
+            alert("Initiated processing for all available videos. Downloads will start if content is available and not already saved via File System API.");
+            // Optionally, refresh the view or clear parts of tabResultStorage.
+            // For now, no automatic refresh. User can re-select tab in dropdown.
+        } else {
+            alert("No downloadable/finalizable videos found in the tracked tabs.");
+        }
+    });
+
+    document.getElementById("availableTabs").onchange = () => {
+        const availableDownloadsContainer = document.getElementById("availableDownloads");
+        availableDownloadsContainer.innerHTML = ""; // Clear previous content
+
+        const selectedTabIdString = document.getElementById("availableTabs").value;
+        // Ensure a tab is selected and it's a valid number
+        if (!selectedTabIdString || isNaN(+selectedTabIdString)) {
+            availableDownloadsContainer.textContent = "Please select a tab.";
+             // Potentially call getChoices for a default/active tab if necessary, or handle appropriately
+            // For now, if no valid tab is selected, we just show the message.
+            // Consider if ids[0].id (active tab) should be used for getChoices if selectedTabId is invalid.
+            // However, ids might not be up-to-date if the active tab changed since UI opened.
+            // Safest might be to only call getChoices if a valid tab is selected from dropdown.
+            return;
+        }
+        const selectedTabId = +selectedTabIdString;
+        const items = tabResultStorage.get(selectedTabId);
+
+        if (!items || items.length === 0) {
+            availableDownloadsContainer.textContent = "No captured media for this tab.";
+        } else {
+            const table = document.createElement("table");
+            table.id = "videoDisplayTable"; // For styling
+
+            const thead = table.createTHead();
+            const headerRow = thead.insertRow();
+            const headers = ["Title", "Type", "ID", "Actions"];
+            headers.forEach(headerText => {
+                const th = document.createElement("th");
+                th.textContent = headerText;
+                headerRow.appendChild(th);
+            });
+
+            const tbody = table.createTBody();
+            for (const item of items) {
+                const row = tbody.insertRow();
+
+                // Title, Type, ID cells
+                [item.title, item.mimeType, item.id].forEach(text => {
+                    const cell = row.insertCell();
+                    cell.textContent = text;
+                });
+
+                // Actions cell
+                const actionsCell = row.insertCell();
+                actionsCell.classList.add("actions-cell"); // For styling multiple buttons
+
+                const actionButton = Object.assign(document.createElement("button"), {
+                    textContent: item.writable ? "Finalize Stream" : "Download",
+                    onclick: (e) => { // Add event argument
+                        browserToUse.tabs.sendMessage(selectedTabId, {
+                            action: item.writable ? "fsFinalize" : "downloadThis",
+                            content: item.id
+                        })
+                        .then(() => {
+                            e.target.closest('tr')?.remove();
+                            if (tbody.rows.length === 0) {
+                                availableDownloadsContainer.innerHTML = "No captured media for this tab.";
+                            }
+                        })
+                        .catch(err => {
+                            console.warn("Error sending action message:", err);
+                            alert("Action failed. See console for details.");
+                        });
+                    }
+                });
+                actionsCell.appendChild(actionButton);
+
+                if (!item.writable) {
+                    const deleteCurrentDataButton = Object.assign(document.createElement("button"), {
+                        textContent: "Clear Cache",
+                        title: "Delete current data from cache",
+                        onclick: (e) => {
+                            browserToUse.tabs.sendMessage(selectedTabId, { action: "deleteThis", content: { id: item.id, permanent: false } })
+                                .then(() => {
+                                    e.target.closest('tr')?.remove();
+                                    if (tbody.rows.length === 0) {
+                                        availableDownloadsContainer.innerHTML = "No captured media for this tab.";
+                                    }
+                                })
+                                .catch(err => {
+                                    console.warn("Error clearing cache:", err);
+                                    alert("Failed to clear cache. See console.");
+                                });
+                        }
+                    });
+                    actionsCell.appendChild(deleteCurrentDataButton);
+
+                    const deletePermanentDataButton = Object.assign(document.createElement("button"), {
+                        textContent: "Forget Item",
+                        title: "Delete current and prevent future data for this item",
+                        onclick: (e) => {
+                            browserToUse.tabs.sendMessage(selectedTabId, { action: "deleteThis", content: { id: item.id, permanent: true } })
+                                .then(() => {
+                                    e.target.closest('tr')?.remove();
+                                    if (tbody.rows.length === 0) {
+                                        availableDownloadsContainer.innerHTML = "No captured media for this tab.";
+                                    }
+                                })
+                                .catch(err => {
+                                    console.warn("Error forgetting item:", err);
+                                    alert("Failed to forget item. See console.");
+                                });
+                        }
+                    });
+                    actionsCell.appendChild(deletePermanentDataButton);
+                }
+            }
+            availableDownloadsContainer.appendChild(table);
+        }
+        // Call getChoices for the currently selected tab, if valid
+        if (selectedTabId && !isNaN(selectedTabId)) {
+             browserToUse.tabs.sendMessage(selectedTabId, { action: "getChoices" });
+        }
     }
+
     browserToUse.runtime.onMessage.addListener((msg) => {
         switch (msg.action) {
             case "getDownloads": { // Received an array of the items available to download

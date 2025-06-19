@@ -4,7 +4,13 @@
      * @type chrome
      */
     const browserToUse = typeof chrome === "undefined" ? browser : chrome;
-    const result = await new Promise((res) => browserToUse.storage.sync.get("urls", res));
+    // const result = await new Promise((res) => browserToUse.storage.sync.get("urls", res));
+
+    // At the beginning of the IIFE, after browserToUse is defined:
+    const initialSettings = await new Promise((res) => browserToUse.storage.sync.get(["urls", "enableAllSitesMode"], res));
+    const initialUrls = initialSettings.urls;
+    const initialEnableAllSitesMode = initialSettings.enableAllSitesMode;
+
     /**
      * Convert a wildcard to a regex.
      * _Made by Claude, since I wouldn't be able to write something like this_
@@ -32,25 +38,76 @@
      * @param {chrome.tabs.Tab} tab the tab to check
      */
     async function eventTabChange(tab) {
-        const result = await new Promise((resolve) => browserToUse.storage.sync.get("urls", resolve));
-        if (result.urls && result.urls.length > 0) {
-            if (result.urls.some(pattern => { // Check that tab URL is allowed from the extension settings
-                try {
-                    const regex = wildcardToRegex(pattern).replaceAll("\\.", ".");
-                    const url = tab.url.trim();
-                    return new RegExp(regex).test(url);
-                } catch (ex) {
-                    return false;
+        // Check if the tab URL is valid for injection
+        if (!tab || !tab.url || (!tab.url.startsWith("http:") && !tab.url.startsWith("https://"))) {
+            // console.log("Skipping injection for non-http(s) URL:", tab.url);
+            return;
+        }
+
+        const settings = await new Promise((resolve) => browserToUse.storage.sync.get(["urls", "enableAllSitesMode"], resolve));
+        const currentUrls = settings.urls;
+        const enableAllSitesModeActive = settings.enableAllSitesMode;
+
+        if (enableAllSitesModeActive) {
+            // console.log("All sites mode active, injecting for:", tab.url);
+            await tabInject(tab);
+        } else {
+            if (currentUrls && currentUrls.length > 0) {
+                if (currentUrls.some(pattern => {
+                    try {
+                        const regex = wildcardToRegex(pattern).replaceAll("\\.", "."); // Keep original replaceAll
+                        const url = tab.url.trim();
+                        return new RegExp(regex).test(url);
+                    } catch (ex) {
+                        // console.error("Regex error for pattern:", pattern, ex);
+                        return false;
+                    }
+                })) {
+                    // console.log("URL match based on pattern, injecting for:", tab.url);
+                    await tabInject(tab);
                 }
-            })) await tabInject(tab);
+            }
         }
     }
-    browserToUse.tabs.onUpdated.addListener((_, __, tab) => {
-        eventTabChange(tab);
+
+    browserToUse.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+        // Ensure injection only happens when the tab is fully loaded or URL changes significantly
+        // For simplicity, let's stick to the original filtering if any, or just use the tab from the event
+        // The original code calls eventTabChange(tab) directly.
+        // Let's ensure 'tab' has a URL. Sometimes changeInfo might be for other things.
+        if (tab.url) { // Only proceed if the tab object has a URL
+            eventTabChange(tab);
+        }
     });
-    if (result.urls) { // When the extension is being activated, check the URLs that have been previously stored and run the scripts there
-        const queryUrl = await new Promise((resolve) => browserToUse.tabs.query({ url: result.urls }, resolve));
-        for (const tab of queryUrl) await tabInject(tab)
+
+    // Initial injection logic when extension starts/reloads
+    if (initialEnableAllSitesMode) {
+        const queryResult = await new Promise((resolve) => browserToUse.tabs.query({ url: ["http://*/*", "https://*/*"] }, resolve));
+        for (const tab of queryResult) {
+            // console.log("Initial injection (all sites mode) for:", tab.url);
+            // Ensure tab URL is valid before injecting - tabInject will also check, but good to be defensive
+            if (tab.url && (tab.url.startsWith("http:") || tab.url.startsWith("https://"))) {
+                await tabInject(tab);
+            }
+        }
+    } else {
+        if (initialUrls && initialUrls.length > 0) {
+            const queryResult = await new Promise((resolve) => browserToUse.tabs.query({}, resolve)); // Query all tabs
+            for (const tab of queryResult) {
+                if (tab.url && initialUrls.some(pattern => {
+                    try {
+                        const regex = wildcardToRegex(pattern).replaceAll("\\.", ".");
+                        return new RegExp(regex).test(tab.url.trim());
+                    } catch (ex) { return false; }
+                })) {
+                    // console.log("Initial injection (specific URLs mode) for:", tab.url);
+                     // Ensure tab URL is valid before injecting
+                    if (tab.url && (tab.url.startsWith("http:") || tab.url.startsWith("https://"))) {
+                        await tabInject(tab);
+                    }
+                }
+            }
+        }
     }
     /**
      * Inject the content scripts in the tab
@@ -72,7 +129,12 @@
                             files: ['script.js'],
                             world: "MAIN"
                         });
-                        browserToUse.tabs.sendMessage(ids[0].id, { // Update user preferences
+                        // browserToUse.tabs.sendMessage(ids[0].id, { // Update user preferences - ids[0] is not defined here
+                        //     action: "updateChoices",
+                        //     content: await browserToUse.storage.sync.get(["finalize_fs_stream_when_video_finishes", "delete_entries_when_video_finishes", "download_content_when_video_finishes"])
+                        // });
+                        // Send message to the specific tab instead of ids[0]
+                        browserToUse.tabs.sendMessage(tab.id, {
                             action: "updateChoices",
                             content: await browserToUse.storage.sync.get(["finalize_fs_stream_when_video_finishes", "delete_entries_when_video_finishes", "download_content_when_video_finishes"])
                         });

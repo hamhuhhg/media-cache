@@ -149,6 +149,7 @@
             href: URL.createObjectURL(new Blob(currentItem.data))
         });
         a.click();
+        URL.revokeObjectURL(a.href); // Add this line
         currentItem.data = [];
     }
     /**

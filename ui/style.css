@@ -79,3 +79,37 @@ button {
 a {
     color: var(--text);
 }
+
+#videoDisplayTable {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 10px; /* Added some margin for spacing */
+}
+
+#videoDisplayTable th, #videoDisplayTable td {
+    border: 1px solid var(--cardsecond); /* Using CSS variable for border */
+    padding: 8px;
+    text-align: left;
+    word-break: break-word; /* Helps prevent layout breaking with long strings */
+}
+
+#videoDisplayTable th {
+    background-color: var(--accent); /* Using CSS variable for header background */
+    color: var(--text); /* Using CSS variable for header text */
+}
+
+/* Styles for the actions cell to manage multiple buttons */
+.actions-cell {
+    display: flex;
+    flex-direction: column; /* Stack buttons vertically */
+    gap: 5px; /* Space between buttons */
+    align-items: stretch; /* Make buttons stretch to fill cell width */
+}
+
+.actions-cell button {
+    width: 100%; /* Make buttons fill cell width */
+    padding: 5px; /* Adjust padding for smaller buttons */
+    font-size: 0.9em; /* Slightly smaller font for these buttons */
+    /* The general button styles (background, border, color) will apply.
+       If specific overrides are needed, they can be added here. */
+}
