@@ -492,13 +492,53 @@
      * The browser interface to use, aliased for consistency.
      * @type Browser | chrome
      */
-    const browserToUse = typeof browser !== "undefined" && browser.runtime ? browser : chrome;
+    // const browserToUse = typeof browser !== "undefined" && browser.runtime ? browser : chrome; // Replaced for direct usage
 
     // Listener for messages from background.js (and potentially popup if it uses runtime.sendMessage)
-    browserToUse.runtime.onMessage.addListener(
-        function(request, sender, sendResponse) {
-            if (request.action === "updateChoices") {
-                console.log("script.js: Received updateChoices from runtime.onMessage", request.content);
+    const runtimeMessageListener = function(request, sender, sendResponse) {
+        // console.log("script.js: Runtime Message received", request);
+        if (request.action === "updateChoices") {
+            console.log("script.js: Received updateChoices via runtime message", request.content);
+            if (request.content && typeof request.content === 'object') {
+                for (const key in request.content) {
+                    if (CUSTOM_BEHAVIOR.hasOwnProperty(key)) {
+                        CUSTOM_BEHAVIOR[key] = !!request.content[key];
+                    }
+                }
+            }
+            updateFloatingDownloadButtonVisibility();
+            comms.postMessage({ from: "b", action: "getChoices", content: CUSTOM_BEHAVIOR });
+            if (typeof sendResponse === 'function') sendResponse({status: "choices updated in script.js"});
+        } else if (request.action === "ping") {
+            // console.log("script.js: Received ping via runtime message");
+            if (typeof sendResponse === 'function') sendResponse({ action: "pong" });
+            return true; // Keep channel open for async response if needed, though sendResponse is sync here.
+        }
+        return false; // Default to not keeping channel open unless explicitly returning true.
+    };
+
+    // Attempt to set up the runtime message listener
+    try {
+        // For content scripts, it's generally safer to check for `chrome.runtime` first,
+        // as `browser` might be polyfilled to be `chrome` anyway in many environments,
+        // or `browser` might refer to the web page's `window.browser` object if one exists.
+        if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.onMessage) {
+            // console.log("script.js: Using chrome.runtime.onMessage");
+            chrome.runtime.onMessage.addListener(runtimeMessageListener);
+        } else if (typeof browser !== "undefined" && browser.runtime && browser.runtime.onMessage) {
+            // console.log("script.js: Using browser.runtime.onMessage (chrome was not available or not standard)");
+            browser.runtime.onMessage.addListener(runtimeMessageListener);
+        } else {
+            console.error("script.js: Critical - Neither chrome.runtime.onMessage nor browser.runtime.onMessage is available for the runtime listener.");
+        }
+    } catch (e) {
+        console.error("script.js: Error setting up runtime message listener:", e);
+    }
+    // Old listener using browserToUse, which might have issues in content script context for Firefox if 'browser' isn't directly available as expected.
+    // browserToUse.runtime.onMessage.addListener(
+    //     function(request, sender, sendResponse) {
+    //         if (request.action === "updateChoices") {
+    //             console.log("script.js: Received updateChoices from runtime.onMessage", request.content);
                 if (request.content && typeof request.content === 'object') {
                     for (const key in request.content) {
                         if (CUSTOM_BEHAVIOR.hasOwnProperty(key)) {

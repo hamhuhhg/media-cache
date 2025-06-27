@@ -17,7 +17,8 @@
         "<all_urls>"
     ],
     "background": {
-        "service_worker": "background.js"
+        "scripts": ["background.js"],
+        "persistent": false
     },
     "browser_specific_settings": {
         "gecko": {
