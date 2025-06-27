@@ -151,8 +151,9 @@
             const id = crypto.randomUUID() ?? `${Math.random()}-${mimeType}-${Date.now()}`;
 
             // Handle "download_on_new_video_in_tab"
+            // console.log("script.js: addSourceBuffer, CUSTOM_BEHAVIOR:", JSON.parse(JSON.stringify(CUSTOM_BEHAVIOR))); // Deep copy for logging
             if (isFirstVideoPlayed && CUSTOM_BEHAVIOR.download_on_new_video_in_tab) {
-                console.log("New video source detected, triggering download for previous items based on 'download_on_new_video_in_tab' setting.");
+                console.log("script.js: New video source detected, download_on_new_video_in_tab=true. Triggering download for previous items.");
                 downloadPreviousItemsAsBlobs();
             }
             if (!isFirstVideoPlayed) {
@@ -254,6 +255,7 @@
      * @param {boolean} [triggerOptions.isVideoEnd=false] - If true, uses 'download_when_video_finishes'.
      */
     function startDownload(triggerOptions = {}) { // This is the more advanced version
+        // console.log("script.js: startDownload called. Trigger:", triggerOptions, "CUSTOM_BEHAVIOR:", JSON.parse(JSON.stringify(CUSTOM_BEHAVIOR)));
         const { isTabClose = false, isVideoEnd = false } = triggerOptions;
         let shouldDownloadBlobs = false;
         let shouldFinalizeFS = false;
@@ -293,16 +295,42 @@
     }
 
     function setupVideoEndedListener() {
-        const videoElement = document.querySelector("video");
-        if (videoElement) {
-            videoElement.addEventListener("ended", () => {
+        const attachListenerToVideo = (videoElem) => {
+            console.log("Attaching 'ended' listener to video element:", videoElem);
+            videoElem.addEventListener("ended", () => {
+                // console.log("script.js: video ended event. CUSTOM_BEHAVIOR:", JSON.parse(JSON.stringify(CUSTOM_BEHAVIOR)));
                 console.log("Video ended event triggered.");
                 startDownload({ isVideoEnd: true });
             });
+        };
+
+        const videoElement = document.querySelector("video");
+        if (videoElement) {
+            attachListenerToVideo(videoElement);
         } else {
-            // Optionally, set up a MutationObserver to detect when a video element is added.
-            // For simplicity now, we'll just note it wasn't found.
-            console.log("No video element found on initial setup of ended listener.");
+            console.log("No video element found on initial setup. Using MutationObserver to detect future video elements.");
+            const observer = new MutationObserver((mutationsList, obs) => {
+                for (const mutation of mutationsList) {
+                    if (mutation.type === 'childList') {
+                        for (const node of mutation.addedNodes) {
+                            if (node.nodeName === 'VIDEO') {
+                                console.log("VIDEO element added to DOM.");
+                                attachListenerToVideo(node);
+                                // Optionally, disconnect observer if you only care about the first video
+                                // obs.disconnect();
+                                // return;
+                            } else if (node.querySelector && node.querySelector('video')) {
+                                // Also check if a video is a descendant of an added node
+                                console.log("VIDEO element found in added subtree.");
+                                attachListenerToVideo(node.querySelector('video'));
+                                // obs.disconnect();
+                                // return;
+                            }
+                        }
+                    }
+                }
+            });
+            observer.observe(document.documentElement, { childList: true, subtree: true });
         }
     }
     // Call it once, and potentially again if DOM changes significantly (though MediaSource hook should be primary)
@@ -323,6 +351,7 @@
 
     const comms = new BroadcastChannel("CUSTOM_MEDIACACHE_EXTENSION_COMMUNICATION");
     window.addEventListener("beforeunload", () => {
+        // console.log("script.js: beforeunload event. CUSTOM_BEHAVIOR:", JSON.parse(JSON.stringify(CUSTOM_BEHAVIOR)));
         console.log("beforeunload event triggered.");
         startDownload({ isTabClose: true });
     });
@@ -395,9 +424,21 @@
                 if (floatingDownloadButton) floatingDownloadButton.style.display = "none";
                 break;
             case "getDownloads":
-                comms.postMessage({ from: "b", action: "getDownloads", context: msg.data.content, content: arr.filter(entry => (entry.writable || entry.data.length > 0)).map(({ id, title, mimeType, data, writable }) => { return { id, title, mimeType, data: msg.data.everything ? data : undefined, writable: msg.data.everything ? writable : !!writable } }) });
+                // msg.data.context from popup is { id: tab.id, title: tab.title, forPopup: true }
+                // We use msg.data.context.id as the originTabId for the response.
+                const responseToPopup = {
+                    from: "b",
+                    action: "getDownloads",
+                    originTabId: msg.data.context?.id, // Correctly using the tab ID from the request's context
+                    context: msg.data.context, // Forward the original context object as received
+                    content: arr.filter(entry => (entry.writable || entry.data.length > 0)).map(({ id, title, mimeType, data, writable }) => { return { id, title, mimeType, data: msg.data.everything ? data : undefined, writable: msg.data.everything ? writable : !!writable } })
+                };
+                // console.log("script.js: Sending getDownloads response to popup:", JSON.parse(JSON.stringify(responseToPopup)));
+                comms.postMessage(responseToPopup);
                 break;
             case "downloadThis":
+                // This message comes from ui/comms.js via BroadcastChannel (comms.postMessage)
+                // msg.data.content is the item ID.
                 singleDownload(msg.data.content);
                 break;
             case "fileSystem":
@@ -447,8 +488,14 @@
         }
     };
 
+    /**
+     * The browser interface to use, aliased for consistency.
+     * @type Browser | chrome
+     */
+    const browserToUse = typeof browser !== "undefined" && browser.runtime ? browser : chrome;
+
     // Listener for messages from background.js (and potentially popup if it uses runtime.sendMessage)
-    (typeof chrome !== "undefined" ? chrome : browser).runtime.onMessage.addListener(
+    browserToUse.runtime.onMessage.addListener(
         function(request, sender, sendResponse) {
             if (request.action === "updateChoices") {
                 console.log("script.js: Received updateChoices from runtime.onMessage", request.content);
