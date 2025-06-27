@@ -63,18 +63,31 @@
                 ones.</button>
         </div><br>
         <div class="card">
-            <h2>After the video ended...</h2>
+            <h2>Video Playback Options:</h2>
+            <p>These settings control actions when a video finishes playing:</p>
             <label class="flex hcenter gap">
-                <input type="checkbox" data-updatechoice="finalize_fs_stream_when_video_finishes">Close the file streams
-                (if the File System API is used)
+                <input type="checkbox" data-updatechoice="finalize_fs_when_video_finishes">Finalize FileSystem stream
             </label>
             <label class="flex hcenter gap">
-                <input type="checkbox" data-updatechoice="download_content_when_video_finishes">Download the videos (if
-                the File System API isn't used)
+                <input type="checkbox" data-updatechoice="download_when_video_finishes">Download (blob) if FileSystem API not used
             </label>
             <label class="flex hcenter gap">
-                <input type="checkbox" data-updatechoice="delete_entries_when_video_finishes">Forbid adding further
-                content to that file
+                <input type="checkbox" data-updatechoice="delete_entries_when_video_finishes">Delete entry after processing (prevents further caching to same file)
+            </label>
+        </div><br>
+        <div class="card">
+            <h2>Floating Download Button:</h2>
+            <label class="flex hcenter gap">
+                <input type="checkbox" data-updatechoice="show_floating_download_button">Show floating button on pages to download cache
+            </label>
+        </div><br>
+        <div class="card">
+            <h2>Automatic Download Triggers:</h2>
+            <label class="flex hcenter gap">
+                <input type="checkbox" data-updatechoice="download_on_new_video_in_tab">Download previous non-FS cache when a new video starts in the same tab
+            </label>
+            <label class="flex hcenter gap">
+                <input type="checkbox" data-updatechoice="download_on_tab_close">Download/Finalize all cached media when tab is closed
             </label>
         </div><br>
         <div class="card">

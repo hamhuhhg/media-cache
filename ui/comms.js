@@ -53,15 +53,45 @@
                         files: ['/script.js'],
                         world: "MAIN"
                     });
-                    browserToUse.tabs.sendMessage(ids[0].id, { // Change what the script should do when the video ends according to the previously-selected things
+                    // Send all current known choices from storage after forcing script run
+                    const currentStoredChoices = await browserToUse.storage.sync.get(Object.keys(allChoiceKeysDefaults));
+                    const choicesToSend = {};
+                    for (const key in allChoiceKeysDefaults) {
+                        choicesToSend[key] = currentStoredChoices.hasOwnProperty(key) ? currentStoredChoices[key] : allChoiceKeysDefaults[key];
+                    }
+                    browserToUse.tabs.sendMessage(ids[0].id, {
                         action: "updateChoices",
-                        content: await browserToUse.storage.sync.get(["finalize_fs_stream_when_video_finishes", "delete_entries_when_video_finishes", "download_content_when_video_finishes"])
+                        content: choicesToSend
                     });
                     checkFunctionaly(); // Check again. If everything works, this card will be hidden
                 }
             }
         });
     }
+
+    // Define all choice keys and their defaults centrally.
+    const allChoiceKeysDefaults = {
+        finalize_fs_when_video_finishes: true,
+        delete_entries_when_video_finishes: false,
+        download_when_video_finishes: true,
+        download_on_new_video_in_tab: false,
+        download_on_tab_close: true,
+        show_floating_download_button: true, // Added new option
+    };
+
+    // Load initial settings from storage to have them available for the change event handler
+    let currentChoicesState = { ...allChoiceKeysDefaults };
+    try {
+        const storedValues = await browserToUse.storage.sync.get(Object.keys(allChoiceKeysDefaults));
+        for (const key in allChoiceKeysDefaults) {
+            if (storedValues.hasOwnProperty(key)) {
+                currentChoicesState[key] = storedValues[key];
+            }
+        }
+    } catch (e) {
+        console.warn("Couldn't get stored choices on init, using defaults.", e);
+    }
+
     checkFunctionaly();
     document.getElementById("addHostname").addEventListener("click", () => { // Add a new hostname (with the wildcard pattern) in the list of the alllowed URLs
         const origin = document.getElementById("newHostname").value;
@@ -160,15 +190,45 @@
     }
 
 
-    for (const checkbox of document.querySelectorAll("[data-updatechoice]")) { // Permit to change the behavior of the script after the video has ended
+    for (const checkbox of document.querySelectorAll("[data-updatechoice]")) { // Permit to change the behavior of the script
+        // Set initial checked state based on loaded settings
+        const propertyName = checkbox.getAttribute("data-updatechoice");
+        if (currentChoicesState.hasOwnProperty(propertyName)) {
+            checkbox.checked = currentChoicesState[propertyName];
+        }
+
         checkbox.addEventListener("change", () => {
-            const [checked, property] = [checkbox.checked, checkbox.getAttribute("data-updatechoice")];
-            browserToUse.storage.sync.set({ [property]: checked });
-            browserToUse.tabs.sendMessage(+document.getElementById("availableTabs").value, {
-                action: "updateChoices",
-                content: { [property]: checked }
-            });
+            const_ = checkbox.checked;
+            const property = checkbox.getAttribute("data-updatechoice");
+
+            // Update local state
+            currentChoicesState[property] = checkbox.checked;
+
+            // Save individual setting to storage
+            browserToUse.storage.sync.set({ [property]: checkbox.checked });
+
+            // Send all current choices to the content script
+            const targetTabId = +document.getElementById("availableTabs").value || ids[0]?.id;
+            if (targetTabId) {
+                browserToUse.tabs.sendMessage(targetTabId, {
+                    action: "updateChoices",
+                    content: { ...currentChoicesState } // Send a copy of the entire state
+                }).catch(e => console.warn(`Error sending updated choices to tab ${targetTabId}:`, e));
+            } else {
+                console.warn("No valid tab selected or available to send choices.");
+            }
         });
     }
-    browserToUse.tabs.sendMessage(ids[0].id, { action: "getChoices" }); // Ask the current choices to the script.
+
+    // Ask the content script of the initially active tab for its current choices
+    // This will update the checkboxes if the script had different settings than storage (e.g. defaults on first run)
+    if (ids[0] && ids[0].id) {
+        browserToUse.tabs.sendMessage(ids[0].id, { action: "getChoices" })
+            .then(response => {
+                if (response && response.action === "getChoices" && response.content) {
+                    // This is now handled by the listener for "getChoices" message below
+                }
+            })
+            .catch(e => console.info("Could not get initial choices from content script, UI will use stored/default values.", e));
+    }
 })()

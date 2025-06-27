@@ -110,9 +110,23 @@
                             files: ['script.js'],
                             world: "MAIN"
                         });
-                        browserToUse.tabs.sendMessage(tab.id, { // Update user preferences - CORRECTED tab.id
+                        // Define default choices to ensure all are passed initially
+                        const defaultChoices = {
+                            finalize_fs_when_video_finishes: true,
+                            delete_entries_when_video_finishes: false,
+                            download_when_video_finishes: true,
+                            download_on_new_video_in_tab: false,
+                            download_on_tab_close: true,
+                            show_floating_download_button: true, // Added new option
+                        };
+                        const storedChoices = await browserToUse.storage.sync.get(Object.keys(defaultChoices));
+                        const choicesToSend = {};
+                        for (const key in defaultChoices) {
+                            choicesToSend[key] = storedChoices.hasOwnProperty(key) ? storedChoices[key] : defaultChoices[key];
+                        }
+                        browserToUse.tabs.sendMessage(tab.id, {
                             action: "updateChoices",
-                            content: await browserToUse.storage.sync.get(["finalize_fs_stream_when_video_finishes", "delete_entries_when_video_finishes", "download_content_when_video_finishes"])
+                            content: choicesToSend
                         });
                         await getPromise(); // Check again
                         resolve();
