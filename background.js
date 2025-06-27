@@ -124,6 +124,8 @@
                         for (const key in defaultChoices) {
                             choicesToSend[key] = storedChoices.hasOwnProperty(key) ? storedChoices[key] : defaultChoices[key];
                         }
+                        // Add a small delay to give script.js time to initialize its message listener
+                        await new Promise(r => setTimeout(r, 500));
                         browserToUse.tabs.sendMessage(tab.id, {
                             action: "updateChoices",
                             content: choicesToSend

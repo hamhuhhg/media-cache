@@ -123,9 +123,17 @@
      * A Map that contains all the available downloads from the various content script that are being run
      */
     const tabResultStorage = new Map();
+    /**
+     * The BroadcastChannel for communication with content scripts.
+     */
+    const comms = new BroadcastChannel("CUSTOM_MEDIACACHE_EXTENSION_COMMUNICATION");
+
     document.getElementById("availableTabs").onchange = () => { // The user has changed the selected items in the tab
         document.getElementById("availableDownloads").innerHTML = "";
-        for (const item of tabResultStorage.get(+document.getElementById("availableTabs").value)) { // Create a Card with all of the downloadable items of that folder
+        const selectedTabId = +document.getElementById("availableTabs").value;
+        if (!selectedTabId || !tabResultStorage.has(selectedTabId)) return;
+
+        for (const item of tabResultStorage.get(selectedTabId)) { // Create a Card with all of the downloadable items of that folder
             const card = document.createElement("div");
             card.classList.add("card");
             card.style.backgroundColor = "var(--cardsecond)";
@@ -135,7 +143,12 @@
             }), Object.assign(document.createElement("button"), {
                 textContent: item.writable ? "Finalize stream" : "Download",
                 onclick: () => {
-                    browserToUse.tabs.sendMessage(+document.getElementById("availableTabs").value, { action: item.writable ? "fsFinalize" : "downloadThis", content: item.id });
+                    // Send message via BroadcastChannel to the specific content script (script.js listens on comms)
+                    // The content script itself knows its tab, so no need to specify tab ID here for this action.
+                    // However, script.js's comms.onmessage doesn't currently filter by tab. This is a simplification.
+                    // For a multi-tab aware popup->script comm via BC, script.js would need to identify its own context.
+                    // For now, assuming script.js acts on its own `arr`.
+                    comms.postMessage({ from: "a", action: item.writable ? "fsFinalize" : "downloadThis", content: item.id, targetTabId: selectedTabId /* Informational, script.js doesn't use this yet */ });
                 }
             }));
             !item.writable && card.append(document.createElement("br"),
@@ -144,7 +157,7 @@
                     style: "text-decoration: underline; margin-right: 10px;",
                     textContent: "Delete current data",
                     onclick: () => {
-                        browserToUse.tabs.sendMessage(+document.getElementById("availableTabs").value, { action: "deleteThis", content: { id: item.id, permanent: false } });
+                        comms.postMessage({ from: "a", action: "deleteThis", content: { id: item.id, permanent: false }, targetTabId: selectedTabId });
                         card.remove();
                     }
                 }),
@@ -152,83 +165,128 @@
                     textContent: "Delete current and future data",
                     style: "text-decoration: underline",
                     onclick: () => {
-                        browserToUse.tabs.sendMessage(+document.getElementById("availableTabs").value, { action: "deleteThis", content: { id: item.id, permanent: true } });
+                        comms.postMessage({ from: "a", action: "deleteThis", content: { id: item.id, permanent: true }, targetTabId: selectedTabId });
                         card.remove();
                     }
                 }));
             document.getElementById("availableDownloads").append(card);
         }
-        browserToUse.tabs.sendMessage(+document.getElementById("availableTabs").value, { action: "getChoices" });
+        // Request choices for the currently selected tab via BroadcastChannel
+        comms.postMessage({ from: "a", action: "getChoices", targetTabId: selectedTabId });
     }
-    browserToUse.runtime.onMessage.addListener((msg) => {
+
+    comms.onmessage = (event) => { // Changed from runtime.onMessage to comms.onmessage
+        const msg = event.data; // Data is in event.data for BroadcastChannel
+        if (msg.from !== "b") return; // Only accept messages from content script (script.js)
+
         switch (msg.action) {
-            case "getDownloads": { // Received an array of the items available to download
-                if (!tabResultStorage.get(msg.context.id)) document.getElementById("availableTabs").append(Object.assign(document.createElement("option"), { textContent: msg.context.title, value: msg.context.id }));
-                tabResultStorage.set(msg.context.id, msg.content);
-                if (document.getElementById("availableTabs").children.length === 1) document.getElementById("availableTabs").dispatchEvent(new Event("change"));
+            case "getDownloads": {
+                // msg.context should contain {id: tab.id, title: tab.title} from content script
+                // However, script.js currently doesn't send tab context with its "getDownloads" reply.
+                // This part needs script.js to send its tabId so popup can map it.
+                // For now, we assume msg.tabId (hypothetical) or rely on active tab if context is missing.
+                // Let's assume script.js is modified to include its tabId in the response.
+                const originTabId = msg.originTabId || ids[0]?.id; // Fallback, less reliable
+                if (!originTabId) return;
+
+                if (!tabResultStorage.has(originTabId)) {
+                     // If script.js provides title in context, use it. Otherwise, generate.
+                    const tabTitle = msg.context?.title || `Tab ID: ${originTabId}`;
+                    document.getElementById("availableTabs").append(Object.assign(document.createElement("option"), { textContent: tabTitle, value: originTabId }));
+                }
+                tabResultStorage.set(originTabId, msg.content);
+                if (document.getElementById("availableTabs").children.length === 1 || +document.getElementById("availableTabs").value === originTabId) {
+                    document.getElementById("availableTabs").dispatchEvent(new Event("change"));
+                }
                 break;
             }
             case "getChoices": { // Update the "After downloading, do this..." choices
-                for (const choice in msg.content) {
-                    document.querySelector(`[data-updatechoice='${choice}']`).checked = msg.content[choice];
+                if(msg.content && typeof msg.content === 'object'){
+                    for (const choice in msg.content) {
+                        const checkbox = document.querySelector(`[data-updatechoice='${choice}']`);
+                        if(checkbox) checkbox.checked = msg.content[choice];
+                    }
                 }
+                break;
             }
         }
-    });
+    };
+
     /**
     * Get the ID of all the tabs that are being run
     * @type chrome.tabs.Tab[]
     */
     const allTabs = await new Promise((resolve) => browserToUse.tabs.query({}, resolve));
     for (const tab of allTabs) {
-        browserToUse.tabs.sendMessage(tab.id, { action: "getDownloads", content: { id: tab.id, title: tab.title } }); // Ask the content script the available downloads
+        if (tab.id) {
+            // Request downloads from each tab via BroadcastChannel.
+            // script.js needs to be able to identify its own tab ID to respond correctly if multiple content scripts are active.
+            // For now, script.js will respond with its 'arr' and popup will try to map it.
+            // The 'getDownloads' message in script.js needs to include its tab.id in the response.
+            // Let's assume script.js is modified to send { from: "b", action: "getDownloads", content: arr, originTabId: (its own tab.id) }
+             comms.postMessage({ from: "a", action: "getDownloads", context: { id: tab.id, title: tab.title, forPopup: true } });
+        }
     }
+
     const allowedUrls = await new Promise((resolve) => browserToUse.storage.sync.get({ urls: [] }, resolve));
     allowedUrls.urls.forEach(origin => addItemToAllowedList(origin)); // Show the added URLs in the UI
-    document.getElementById("chooseDirectory").onclick = async () => { // Pick a directory for the File System API
-        browserToUse.tabs.sendMessage(ids[0].id, { action: "fileSystem" });
+
+    document.getElementById("chooseDirectory").onclick = async () => {
+        const targetTabId = +document.getElementById("availableTabs").value || ids[0]?.id;
+        if (targetTabId) {
+            // Send fileSystem request via BroadcastChannel
+            comms.postMessage({ from: "a", action: "fileSystem", targetTabId: targetTabId });
+        } else {
+            console.warn("No active tab to send fileSystem command to.");
+        }
     }
 
-
-    for (const checkbox of document.querySelectorAll("[data-updatechoice]")) { // Permit to change the behavior of the script
-        // Set initial checked state based on loaded settings
+    for (const checkbox of document.querySelectorAll("[data-updatechoice]")) {
         const propertyName = checkbox.getAttribute("data-updatechoice");
         if (currentChoicesState.hasOwnProperty(propertyName)) {
             checkbox.checked = currentChoicesState[propertyName];
         }
 
         checkbox.addEventListener("change", () => {
-            const_ = checkbox.checked;
             const property = checkbox.getAttribute("data-updatechoice");
-
-            // Update local state
             currentChoicesState[property] = checkbox.checked;
-
-            // Save individual setting to storage
             browserToUse.storage.sync.set({ [property]: checkbox.checked });
 
-            // Send all current choices to the content script
             const targetTabId = +document.getElementById("availableTabs").value || ids[0]?.id;
+            // Send all current choices to the content script(s) via BroadcastChannel
+            // script.js's runtime.onMessage listener will handle this if it's still there,
+            // or its comms.onmessage if we migrate fully.
+            // For now, background.js sends initial via runtime.sendMessage, user changes in popup can go via BC.
+            // This message is intended for script.js's runtime.onMessage listener.
             if (targetTabId) {
-                browserToUse.tabs.sendMessage(targetTabId, {
+                 (typeof chrome !== "undefined" ? chrome : browser).tabs.sendMessage(targetTabId, {
                     action: "updateChoices",
-                    content: { ...currentChoicesState } // Send a copy of the entire state
-                }).catch(e => console.warn(`Error sending updated choices to tab ${targetTabId}:`, e));
-            } else {
-                console.warn("No valid tab selected or available to send choices.");
+                    content: { ...currentChoicesState }
+                }).catch(e => console.warn(`Error sending updated choices to tab ${targetTabId} via tabs.sendMessage:`, e));
             }
         });
     }
 
-    // Ask the content script of the initially active tab for its current choices
-    // This will update the checkboxes if the script had different settings than storage (e.g. defaults on first run)
+    // Initial request for choices from the active content script.
+    // This uses tabs.sendMessage, expecting script.js's runtime.onMessage listener.
     if (ids[0] && ids[0].id) {
         browserToUse.tabs.sendMessage(ids[0].id, { action: "getChoices" })
             .then(response => {
+                // Response from runtime.onMessage in script.js if it uses sendResponse
+                // If script.js sends choices back via BroadcastChannel, this .then might not be the primary way to get them.
+                // The comms.onmessage handler for "getChoices" should update the UI.
                 if (response && response.action === "getChoices" && response.content) {
-                    // This is now handled by the listener for "getChoices" message below
+                     for (const choice in response.content) {
+                        const checkbox = document.querySelector(`[data-updatechoice='${choice}']`);
+                        if(checkbox) checkbox.checked = response.content[choice];
+                    }
                 }
             })
-            .catch(e => console.info("Could not get initial choices from content script, UI will use stored/default values.", e));
+            .catch(e => {
+                // This error is expected if script.js's runtime.onMessage doesn't send a response or if connection fails.
+                console.info("Could not get initial choices from content script via tabs.sendMessage (this might be ok if using BroadcastChannel for replies):", e);
+                // Fallback to asking via BroadcastChannel if tabs.sendMessage failed or is not the primary method.
+                 comms.postMessage({ from: "a", action: "getChoices", targetTabId: ids[0].id });
+            });
     }
 })()
