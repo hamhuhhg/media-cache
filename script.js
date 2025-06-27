@@ -534,33 +534,36 @@
     } catch (e) {
         console.error("script.js: Error setting up runtime message listener:", e);
     }
+    // The following block was the source of the SyntaxError and is now fully removed.
+    /*
     // Old listener using browserToUse, which might have issues in content script context for Firefox if 'browser' isn't directly available as expected.
     // browserToUse.runtime.onMessage.addListener(
     //     function(request, sender, sendResponse) {
     //         if (request.action === "updateChoices") {
     //             console.log("script.js: Received updateChoices from runtime.onMessage", request.content);
-                if (request.content && typeof request.content === 'object') {
-                    for (const key in request.content) {
-                        if (CUSTOM_BEHAVIOR.hasOwnProperty(key)) {
-                            CUSTOM_BEHAVIOR[key] = !!request.content[key];
-                        }
-                    }
-                }
-                updateFloatingDownloadButtonVisibility();
-                // Optionally, acknowledge the message if sendResponse is used by sender
-                // sendResponse({status: "choices updated"});
+    //             if (request.content && typeof request.content === 'object') {
+    //                 for (const key in request.content) {
+    //                     if (CUSTOM_BEHAVIOR.hasOwnProperty(key)) {
+    //                         CUSTOM_BEHAVIOR[key] = !!request.content[key];
+    //                     }
+    //                 }
+    //             }
+    //             updateFloatingDownloadButtonVisibility();
+    //             // Optionally, acknowledge the message if sendResponse is used by sender
+    //             // sendResponse({status: "choices updated"});
 
-                // Inform the BroadcastChannel listeners (like the popup) about the choices too,
-                // as this might be the initial load of settings.
-                comms.postMessage({ from: "b", action: "getChoices", content: CUSTOM_BEHAVIOR });
-            } else if (request.action === "ping") { // Respond to pings from background/popup
-                sendResponse({ action: "pong" });
-                return true; // Indicates that sendResponse will be called asynchronously (or synchronously)
-            }
-            // Return true if you intend to send a response asynchronously
-            // return true;
-        }
-    );
+    //             // Inform the BroadcastChannel listeners (like the popup) about the choices too,
+    //             // as this might be the initial load of settings.
+    //             comms.postMessage({ from: "b", action: "getChoices", content: CUSTOM_BEHAVIOR });
+    //         } else if (request.action === "ping") { // Respond to pings from background/popup
+    //             sendResponse({ action: "pong" });
+    //             return true; // Indicates that sendResponse will be called asynchronously (or synchronously)
+    //         }
+    //         // Return true if you intend to send a response asynchronously
+    //         // return true;
+    //     }
+    // );
+    */
 
 })()
 undefined;
