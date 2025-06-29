@@ -4,58 +4,10 @@
      * Includes some flags that can be enabled/disabled either from the code or from the extension UI. These might not always work.
      */
     const CUSTOM_BEHAVIOR = {
-        // Options from the restored version
-        finalize_fs_stream_when_video_finishes: true, // Will be renamed/replaced by finalize_fs_when_video_finishes
-        delete_entries_when_video_finishes: false,
-        download_content_when_video_finishes: true, // Will be renamed/replaced by download_when_video_finishes
-
-        // Re-adding newer options with their defaults
-        finalize_fs_when_video_finishes: true,
-        download_when_video_finishes: true,
-        download_on_new_video_in_tab: false,
-        download_on_tab_close: true,
-        show_floating_download_button: true,
-    };
-    // Clean up duplicate/old keys after merging if necessary - for now, new keys will override if names clash
-    // More precise merge:
-    const defaultRestoredBehavior = {
         finalize_fs_stream_when_video_finishes: true,
         delete_entries_when_video_finishes: false,
         download_content_when_video_finishes: true
-    };
-    const addedBehavior = {
-        finalize_fs_when_video_finishes: true, // New name
-        download_when_video_finishes: true,    // New name
-        download_on_new_video_in_tab: false,
-        download_on_tab_close: true,
-        show_floating_download_button: true,
-    };
-    // Initialize CUSTOM_BEHAVIOR with all desired keys and defaults
-    Object.assign(CUSTOM_BEHAVIOR, addedBehavior); // Add new/renamed keys
-    // Remove old keys if their names changed to avoid confusion, or ensure they are correctly mapped.
-    // For clarity, let's define the final structure directly:
-    const FINAL_CUSTOM_BEHAVIOR_DEFAULTS = {
-        finalize_fs_when_video_finishes: true,
-        delete_entries_when_video_finishes: false,
-        download_when_video_finishes: true,
-        download_on_new_video_in_tab: false,
-        download_on_tab_close: true,
-        show_floating_download_button: true,
-    };
-    // Overwrite CUSTOM_BEHAVIOR with the final clean structure
-    for (const key in CUSTOM_BEHAVIOR) { delete CUSTOM_BEHAVIOR[key]; } // Clear old object
-    Object.assign(CUSTOM_BEHAVIOR, FINAL_CUSTOM_BEHAVIOR_DEFAULTS); // Assign clean defaults
-
-
-    /**
-     * Tracks if a video has started playing in the current tab to help with download_on_new_video_in_tab
-     */
-    let isFirstVideoPlayed = false;
-    /**
-     * Reference to the floating download button element.
-     * @type {HTMLButtonElement | null}
-     */
-    let floatingDownloadButton = null;
+    }
 
     /**
      * Get the suggested title for the file.
@@ -149,42 +101,24 @@
                 } else finalTitle = true;
             }
             const id = crypto.randomUUID() ?? `${Math.random()}-${mimeType}-${Date.now()}`;
-
-            // Handle "download_on_new_video_in_tab"
-            // console.log("script.js: addSourceBuffer, CUSTOM_BEHAVIOR:", JSON.parse(JSON.stringify(CUSTOM_BEHAVIOR))); // Deep copy for logging
-            if (isFirstVideoPlayed && CUSTOM_BEHAVIOR.download_on_new_video_in_tab) {
-                console.log("script.js: New video source detected, download_on_new_video_in_tab=true. Triggering download for previous items.");
-                downloadPreviousItemsAsBlobs();
-            }
-            if (!isFirstVideoPlayed) {
-                isFirstVideoPlayed = true;
-            }
-
             arr[arr.length] = { mimeType, data: [], title: document.title, id };
             setTimeout(() => addTitle(id, 0), 1500);
-            // Only attempt to use FileSystemAPI if picker is defined AND showDirectoryPicker is supported
-            if (picker !== undefined && typeof window.showDirectoryPicker === 'function') {
+            if (picker !== undefined) {
                 setTimeout(() => {
                     async function nextStep() {
                         if (!finalTitle) { // We'll wait that the title of the file is final before writing it to the FS.
                             await new Promise((res) => setTimeout(res, 1750));
                             return await nextStep();
                         }
-                        const currentItem = arr.find(entry => entry.id === id);
-                        if (!currentItem) return;
+                        intelligentFileHandle(arr.find(entry => entry.id === id).title).then((handle) => {
+                            handle.createWritable().then(async (writable) => { // Write the previously-fetched data on the file, and delete it.
+                                await fsWriteOperation(id, writable, handle);
+                            }).catch((ex) => console.warn(ex));
 
-                        intelligentFileHandle(currentItem.title).then((handle) => {
-                           if (handle) {
-                                handle.createWritable().then(async (writable) => {
-                                    await fsWriteOperation(id, writable, handle);
-                                }).catch((ex) => {
-                                    console.warn("Failed to create writable stream, falling back to blob download for this item if data exists.", ex);
-                                });
-                            }
-                        }).catch((ex) => console.warn("Error in intelligentFileHandle sequence for FS:", ex));
+                        }).catch((ex) => console.warn(ex)); // If it wasn't possible to create the file, we won't do anything.
                     }
                     nextStep();
-                }, 1600)
+                }, 1600) // We'll wait 1750ms so that there's a possibility of having the new title.
             }
             const originalAppend = sourceBuffer.appendBuffer;
             sourceBuffer.appendBuffer = function (data) {
@@ -226,222 +160,32 @@
             CUSTOM_BEHAVIOR.download_content_when_video_finishes && singleDownload(arr[i].id);
             CUSTOM_BEHAVIOR.finalize_fs_stream_when_video_finishes && arr[i].writable?.close();
         }
-        // Re-introduce the more robust startDownload from the version with more features
-        // CUSTOM_BEHAVIOR.delete_entries_when_video_finishes && arr.splice(0, length); // This old line is removed
+        CUSTOM_BEHAVIOR.delete_entries_when_video_finishes && arr.splice(0, length);
     }
-
-    /**
-     * Specifically downloads items that are not associated with a FileSystem writable stream.
-     */
-    function downloadPreviousItemsAsBlobs() {
-        const itemsToProcess = [...arr];
-        let itemsWereDownloaded = false;
-        for (const item of itemsToProcess) {
-            if (!item.writable && item.data && item.data.length > 0) {
-                console.log(`Downloading previous item ${item.title} as Blob due to new video.`);
-                singleDownload(item.id);
-                itemsWereDownloaded = true;
-            }
-        }
-        if (itemsWereDownloaded) {
-            console.log("Finished processing previous items for blob download.");
-        }
-    }
-
-    /**
-     * Download every ArrayBuffer stored or finalize FileSystem writables, respecting CUSTOM_BEHAVIOR settings.
-     * @param {object} [triggerOptions] - Options to override default behavior based on the trigger.
-     * @param {boolean} [triggerOptions.isTabClose=false] - If true, uses 'download_on_tab_close'.
-     * @param {boolean} [triggerOptions.isVideoEnd=false] - If true, uses 'download_when_video_finishes'.
-     */
-    function startDownload(triggerOptions = {}) { // This is the more advanced version
-        // console.log("script.js: startDownload called. Trigger:", triggerOptions, "CUSTOM_BEHAVIOR:", JSON.parse(JSON.stringify(CUSTOM_BEHAVIOR)));
-        const { isTabClose = false, isVideoEnd = false } = triggerOptions;
-        let shouldDownloadBlobs = false;
-        let shouldFinalizeFS = false;
-        let shouldDeleteAfterProcessing = CUSTOM_BEHAVIOR.delete_entries_when_video_finishes;
-
-        if (isTabClose) {
-            if (!CUSTOM_BEHAVIOR.download_on_tab_close) return;
-            shouldDownloadBlobs = true;
-            shouldFinalizeFS = true;
-        } else if (isVideoEnd) {
-            if (!CUSTOM_BEHAVIOR.download_when_video_finishes && !CUSTOM_BEHAVIOR.finalize_fs_when_video_finishes) return;
-            shouldDownloadBlobs = CUSTOM_BEHAVIOR.download_when_video_finishes;
-            shouldFinalizeFS = CUSTOM_BEHAVIOR.finalize_fs_when_video_finishes;
-        } else { // Generic call (e.g. manual from button)
-            shouldDownloadBlobs = true; // Default to attempting blob download for manual calls
-            shouldFinalizeFS = true;  // Default to attempting FS finalize for manual calls
-        }
-
-        const itemsToProcess = [...arr];
-        for (const item of itemsToProcess) {
-            if (item.writable && typeof item.writable.close === 'function') {
-                if (shouldFinalizeFS) {
-                    console.log(`Finalizing FS stream for: ${item.title}`);
-                    item.writable.close().then(() => {
-                        if (shouldDeleteAfterProcessing) {
-                            const index = arr.findIndex(i => i.id === item.id);
-                            if (index !== -1) arr.splice(index, 1);
-                        }
-                    }).catch(e => console.warn(`Error closing writable for ${item.title}:`, e));
-                }
-            } else if (item.data && item.data.length > 0) {
-                if (shouldDownloadBlobs) {
-                    singleDownload(item.id);
-                }
-            }
-        }
-    }
-
-    function setupVideoEndedListener() {
-        const attachListenerToVideo = (videoElem) => {
-            console.log("Attaching 'ended' listener to video element:", videoElem);
-            videoElem.addEventListener("ended", () => {
-                // console.log("script.js: video ended event. CUSTOM_BEHAVIOR:", JSON.parse(JSON.stringify(CUSTOM_BEHAVIOR)));
-                console.log("Video ended event triggered.");
-                startDownload({ isVideoEnd: true });
-            });
-        };
-
-        const videoElement = document.querySelector("video");
-        if (videoElement) {
-            attachListenerToVideo(videoElement);
-        } else {
-            console.log("No video element found on initial setup. Using MutationObserver to detect future video elements.");
-            const observer = new MutationObserver((mutationsList, obs) => {
-                for (const mutation of mutationsList) {
-                    if (mutation.type === 'childList') {
-                        for (const node of mutation.addedNodes) {
-                            if (node.nodeName === 'VIDEO') {
-                                console.log("VIDEO element added to DOM.");
-                                attachListenerToVideo(node);
-                                // Optionally, disconnect observer if you only care about the first video
-                                // obs.disconnect();
-                                // return;
-                            } else if (node.querySelector && node.querySelector('video')) {
-                                // Also check if a video is a descendant of an added node
-                                console.log("VIDEO element found in added subtree.");
-                                attachListenerToVideo(node.querySelector('video'));
-                                // obs.disconnect();
-                                // return;
-                            }
-                        }
-                    }
-                }
-            });
-            observer.observe(document.documentElement, { childList: true, subtree: true });
-        }
-    }
-    // Call it once, and potentially again if DOM changes significantly (though MediaSource hook should be primary)
-    try {
-        setupVideoEndedListener();
-    } catch (e) {
-        console.warn("Error during initial setupVideoEndedListener call:", e);
-    }
-
-    try {
-        await start(); // This internally hooks into MediaSource
-    } catch (e) {
-        console.error("Error during initial start() call:", e);
-        // If start() fails, the core functionality is broken.
-        // We might want to display an error to the user or disable further operations.
-        // For now, just log, but this is a critical failure point.
-    }
-
-    const comms = new BroadcastChannel("CUSTOM_MEDIACACHE_EXTENSION_COMMUNICATION");
-    window.addEventListener("beforeunload", () => {
-        // console.log("script.js: beforeunload event. CUSTOM_BEHAVIOR:", JSON.parse(JSON.stringify(CUSTOM_BEHAVIOR)));
-        console.log("beforeunload event triggered.");
-        startDownload({ isTabClose: true });
-    });
-
-    /**
-     * Manually triggers download/finalization for all currently cached items.
-     */
-    function manualDownloadAllNow() {
-        console.log("Manual download triggered by floating button.");
-        const itemsToProcess = [...arr];
-        if (itemsToProcess.length === 0) {
-            alert("MediaCache: No cached media to download for this tab.");
-            return;
-        }
-        // Use the generic startDownload, which defaults to trying to process all.
+    document.querySelector("video")?.addEventListener("ended", () => {
         startDownload();
-        // Alert based on actual processing is harder here as startDownload is async for FS.
-        // For simplicity, we won't have a specific "nothing processed" alert here if startDownload handles it.
-    }
-
-    /**
-     * Creates or updates the floating download button's visibility and existence.
-     */
-    function updateFloatingDownloadButtonVisibility() {
-        if (CUSTOM_BEHAVIOR.show_floating_download_button) {
-            if (!floatingDownloadButton) {
-                floatingDownloadButton = document.createElement("button");
-                floatingDownloadButton.textContent = "⬇️ Download Cache";
-                floatingDownloadButton.style.position = "fixed";
-                floatingDownloadButton.style.bottom = "20px";
-                floatingDownloadButton.style.right = "20px";
-                floatingDownloadButton.style.zIndex = "99999";
-                floatingDownloadButton.style.padding = "10px 15px";
-                floatingDownloadButton.style.backgroundColor = "#007bff";
-                floatingDownloadButton.style.color = "white";
-                floatingDownloadButton.style.border = "none";
-                floatingDownloadButton.style.borderRadius = "5px";
-                floatingDownloadButton.style.cursor = "pointer";
-                floatingDownloadButton.style.boxShadow = "0 2px 5px rgba(0,0,0,0.2)";
-                floatingDownloadButton.style.fontSize = "14px";
-                floatingDownloadButton.setAttribute("id", "mediaCacheFloatingDownloadBtn");
-                floatingDownloadButton.addEventListener("click", manualDownloadAllNow);
-                document.body.appendChild(floatingDownloadButton);
-            } else {
-                floatingDownloadButton.style.display = "block";
-            }
-        } else {
-            if (floatingDownloadButton) {
-                floatingDownloadButton.style.display = "none";
-            }
-        }
-    }
-    // Initial check for button visibility after script loads and CUSTOM_BEHAVIOR is set.
-    // This needs to be called after CUSTOM_BEHAVIOR is potentially updated by stored settings.
-    // So, call it inside the 'updateChoices' message handler for the first update, and initially.
-    // updateFloatingDownloadButtonVisibility(); // REMOVED - Will be called from updateChoices after first settings are received
-
-
+    })
+    await start();
+    const comms = new BroadcastChannel("CUSTOM_MEDIACACHE_EXTENSION_COMMUNICATION"); // This is replaced every time the extension is built
+    window.addEventListener("beforeunload", () => {
+        startDownload();
+    })
     comms.onmessage = (msg) => {
         if (msg.data.from !== "a") return; // Receive requests only from the isolated content script
         switch (msg.data.action) {
             case "start":
-                start(); // Re-initialize MediaSource hooks if needed (e.g. after script was stopped)
-                setupVideoEndedListener(); // Re-attach listener if videos might have changed
+                start();
                 break;
             case "stop":
                 arr = [];
-                isFirstVideoPlayed = false;
-                // Potentially remove floating button or disable it if script is "stopped"
-                if (floatingDownloadButton) floatingDownloadButton.style.display = "none";
                 break;
-            case "getDownloads":
-                // msg.data.context from popup is { id: tab.id, title: tab.title, forPopup: true }
-                // We use msg.data.context.id as the originTabId for the response.
-                const responseToPopup = {
-                    from: "b",
-                    action: "getDownloads",
-                    originTabId: msg.data.context?.id, // Correctly using the tab ID from the request's context
-                    context: msg.data.context, // Forward the original context object as received
-                    content: arr.filter(entry => (entry.writable || entry.data.length > 0)).map(({ id, title, mimeType, data, writable }) => { return { id, title, mimeType, data: msg.data.everything ? data : undefined, writable: msg.data.everything ? writable : !!writable } })
-                };
-                // console.log("script.js: Sending getDownloads response to popup:", JSON.parse(JSON.stringify(responseToPopup)));
-                comms.postMessage(responseToPopup);
+            case "getDownloads": // Return the downlaods available
+                comms.postMessage({ from: "b", action: "getDownloads", context: msg.data.content, content: arr.filter(entry => (entry.writable || entry.data.length > 0)).map(({ id, title, mimeType, data, writable }) => { return { id, title, mimeType, data: msg.data.everything ? data : undefined, writable: msg.data.everything ? writable : !!writable } }) });
                 break;
-            case "downloadThis":
-                // This message comes from ui/comms.js via BroadcastChannel (comms.postMessage)
-                // msg.data.content is the item ID.
+            case "downloadThis": // Download the item in the data.content position
                 singleDownload(msg.data.content);
                 break;
-            case "fileSystem":
+            case "fileSystem": // Pick a directory, and write the previously-cached files there.
                 async function apply(res) {
                     picker = res;
                     for (let i = 0; i < arr.length; i++) {
@@ -470,16 +214,7 @@
                 arr.splice(index, 1);
                 break;
             case "updateChoices": // Update the CUSTOM_BEHAVIOR settings
-                if (msg.data.content && typeof msg.data.content === 'object') {
-                    for (const key in msg.data.content) {
-                        if (CUSTOM_BEHAVIOR.hasOwnProperty(key)) {
-                            CUSTOM_BEHAVIOR[key] = !!msg.data.content[key];
-                        }
-                    }
-                }
-                // Always call after choices are updated. This ensures the button visibility
-                // is correct based on the latest settings, including the initial ones from background.js.
-                updateFloatingDownloadButtonVisibility();
+                for (const key in msg.data.content) CUSTOM_BEHAVIOR[key] = !!msg.data.content[key];
                 comms.postMessage({ from: "b", action: "getChoices", content: CUSTOM_BEHAVIOR });
                 break;
             case "getChoices": // Return the CUSTOM_BEHAVIOR settings
@@ -487,83 +222,5 @@
                 break;
         }
     };
-
-    /**
-     * The browser interface to use, aliased for consistency.
-     * @type Browser | chrome
-     */
-    // const browserToUse = typeof browser !== "undefined" && browser.runtime ? browser : chrome; // Replaced for direct usage
-
-    // Listener for messages from background.js (and potentially popup if it uses runtime.sendMessage)
-    const runtimeMessageListener = function(request, sender, sendResponse) {
-        // console.log("script.js: Runtime Message received", request);
-        if (request.action === "updateChoices") {
-            console.log("script.js: Received updateChoices via runtime message", request.content);
-            if (request.content && typeof request.content === 'object') {
-                for (const key in request.content) {
-                    if (CUSTOM_BEHAVIOR.hasOwnProperty(key)) {
-                        CUSTOM_BEHAVIOR[key] = !!request.content[key];
-                    }
-                }
-            }
-            updateFloatingDownloadButtonVisibility();
-            comms.postMessage({ from: "b", action: "getChoices", content: CUSTOM_BEHAVIOR });
-            if (typeof sendResponse === 'function') sendResponse({status: "choices updated in script.js"});
-        } else if (request.action === "ping") {
-            // console.log("script.js: Received ping via runtime message");
-            if (typeof sendResponse === 'function') sendResponse({ action: "pong" });
-            return true; // Keep channel open for async response if needed, though sendResponse is sync here.
-        }
-        return false; // Default to not keeping channel open unless explicitly returning true.
-    };
-
-    // Attempt to set up the runtime message listener
-    try {
-        // For content scripts, it's generally safer to check for `chrome.runtime` first,
-        // as `browser` might be polyfilled to be `chrome` anyway in many environments,
-        // or `browser` might refer to the web page's `window.browser` object if one exists.
-        if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.onMessage) {
-            // console.log("script.js: Using chrome.runtime.onMessage");
-            chrome.runtime.onMessage.addListener(runtimeMessageListener);
-        } else if (typeof browser !== "undefined" && browser.runtime && browser.runtime.onMessage) {
-            // console.log("script.js: Using browser.runtime.onMessage (chrome was not available or not standard)");
-            browser.runtime.onMessage.addListener(runtimeMessageListener);
-        } else {
-            console.error("script.js: Critical - Neither chrome.runtime.onMessage nor browser.runtime.onMessage is available for the runtime listener.");
-        }
-    } catch (e) {
-        console.error("script.js: Error setting up runtime message listener:", e);
-    }
-    // The following block was the source of the SyntaxError and is now fully removed.
-    /*
-    // Old listener using browserToUse, which might have issues in content script context for Firefox if 'browser' isn't directly available as expected.
-    // browserToUse.runtime.onMessage.addListener(
-    //     function(request, sender, sendResponse) {
-    //         if (request.action === "updateChoices") {
-    //             console.log("script.js: Received updateChoices from runtime.onMessage", request.content);
-    //             if (request.content && typeof request.content === 'object') {
-    //                 for (const key in request.content) {
-    //                     if (CUSTOM_BEHAVIOR.hasOwnProperty(key)) {
-    //                         CUSTOM_BEHAVIOR[key] = !!request.content[key];
-    //                     }
-    //                 }
-    //             }
-    //             updateFloatingDownloadButtonVisibility();
-    //             // Optionally, acknowledge the message if sendResponse is used by sender
-    //             // sendResponse({status: "choices updated"});
-
-    //             // Inform the BroadcastChannel listeners (like the popup) about the choices too,
-    //             // as this might be the initial load of settings.
-    //             comms.postMessage({ from: "b", action: "getChoices", content: CUSTOM_BEHAVIOR });
-    //         } else if (request.action === "ping") { // Respond to pings from background/popup
-    //             sendResponse({ action: "pong" });
-    //             return true; // Indicates that sendResponse will be called asynchronously (or synchronously)
-    //         }
-    //         // Return true if you intend to send a response asynchronously
-    //         // return true;
-    //     }
-    // );
-    */
-
 })()
 undefined;
